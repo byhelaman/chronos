@@ -12,7 +12,7 @@ from PyQt6.QtCore import QObject, pyqtSignal, QThread
 from typing import Optional, Dict
 
 # Versión actual de la aplicación
-CURRENT_VERSION = "0.1.0"
+CURRENT_VERSION = "0.1.1"
 
 def parse_version(v: str) -> tuple:
     """Parsea versión 'X.Y.Z' a tupla de enteros para comparación."""

@@ -44,6 +44,7 @@ def show_message(parent, title, text, icon, buttons=QMessageBox.StandardButton.O
     msg.setStyleSheet("""
         QMessageBox {
             background-color: #FFFFFF;
+            min-width: 200px;
         }
         QLabel {
             color: #09090B;

@@ -2171,6 +2171,7 @@ class SchedulePlanner(QMainWindow):
             /* QMessageBox Styling */
             QMessageBox {
                 background-color: #FFFFFF;
+                min-width: 200px;
             }
             QMessageBox QLabel {
                 color: #09090B;

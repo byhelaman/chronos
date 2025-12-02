@@ -24,9 +24,20 @@ class SessionManager:
     
     def _get_session_path(self) -> Path:
         """Obtiene la ruta del archivo de sesión"""
-        # Guardar en el mismo directorio de la app
-        app_dir = Path(__file__).parent
-        return app_dir / self.SESSION_FILE
+        # Usar directorio de datos del usuario para persistencia
+        # Esto funciona tanto en desarrollo como en .exe
+        if os.name == 'nt':  # Windows
+            app_data = os.getenv('APPDATA')
+            if not app_data:
+                app_data = os.path.expanduser('~')
+            base_dir = Path(app_data) / 'Chronos'
+        else:  # Linux/Mac
+            base_dir = Path.home() / '.chronos'
+        
+        # Crear directorio si no existe
+        base_dir.mkdir(parents=True, exist_ok=True)
+        
+        return base_dir / self.SESSION_FILE
     
     def save_session(self, supabase: Client, user_info: Dict, config: Dict) -> None:
         """

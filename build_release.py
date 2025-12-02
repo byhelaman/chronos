@@ -76,19 +76,25 @@ def main():
         "--windowed",
         "--name", f"{APP_NAME}",
         "--clean",
+        "--noupx",  # No usar UPX - mejora tiempo de inicio
         "--add-data", f"{ICON_FILE};.", # Bundle icon
         # Hidden imports necesarios
         "--hidden-import", "pandas",
         "--hidden-import", "babel.numbers",
         "--hidden-import", "httpx",
         "--hidden-import", "pyqt6",
-        # Excluir módulos pesados no utilizados
+        # Excluir módulos pesados no utilizados (reduce tamaño y tiempo de carga)
         "--exclude-module", "matplotlib",
         "--exclude-module", "tkinter",
         "--exclude-module", "scipy",
         "--exclude-module", "notebook",
         "--exclude-module", "ipython",
         "--exclude-module", "jedi",
+        "--exclude-module", "PIL",
+        "--exclude-module", "setuptools",
+        "--exclude-module", "distutils",
+        "--exclude-module", "test",
+        "--exclude-module", "unittest",
         MAIN_SCRIPT
     ]
     
