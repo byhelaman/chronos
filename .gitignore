@@ -28,4 +28,4 @@ credentials.json
 
 # OS generated files
 .DS_Store
-Thumbs.db
+*.sql
