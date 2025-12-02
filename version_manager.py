@@ -12,7 +12,7 @@ from PyQt6.QtCore import QObject, pyqtSignal, QThread
 from typing import Optional, Dict
 
 # Versión actual de la aplicación
-CURRENT_VERSION = "0.1.1"
+CURRENT_VERSION = "0.1.2"
 
 def parse_version(v: str) -> tuple:
     """Parsea versión 'X.Y.Z' a tupla de enteros para comparación."""
@@ -155,7 +155,8 @@ class DownloadThread(QThread):
         
     def run(self):
         try:
-            with httpx.Client() as client:
+            # Configurar cliente para seguir redirects (GitHub usa 302 para assets)
+            with httpx.Client(follow_redirects=True) as client:
                 with client.stream("GET", self.url, timeout=30) as response:
                     response.raise_for_status()
                     
