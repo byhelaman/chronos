@@ -150,8 +150,12 @@ class AuthManager:
     def get_client(self) -> Client:
         """Obtiene el cliente de Supabase actual"""
         if not self._supabase:
-            # Si no hay cliente autenticado, retornar uno anónimo
-            return self.create_supabase_client()
+            # Si no hay cliente autenticado, lanzar error claro
+            raise Exception(
+                "No authenticated Supabase client available. "
+                "This usually means the user session has not been initialized. "
+                "Please ensure auth_manager.set_client() is called after login."
+            )
         return self._supabase
 
     @classmethod
