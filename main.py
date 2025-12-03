@@ -30,7 +30,9 @@ from auth_manager import auth_manager
 from config_manager import config_manager
 from session_manager import session_manager
 from ui_login import LoginDialog
+
 from version_manager import version_manager, CURRENT_VERSION as APP_VERSION
+import permissions # Importar constantes de permisos
 
 # Imports del sistema de temas y componentes
 from theme_manager import theme
@@ -2401,6 +2403,8 @@ class SchedulePlanner(QMainWindow):
         self.auto_assign_btn.setEnabled(False)
         right_buttons_layout.addWidget(self.auto_assign_btn)
         
+
+        
         right_buttons_layout.addWidget(self.export_btn)
         right_buttons_layout.addWidget(self.clear_btn)
         
@@ -2520,6 +2524,10 @@ class SchedulePlanner(QMainWindow):
         main_layout.addWidget(self.table)
 
         self.simple_view_cb.setChecked(True)
+        
+        # Aplicar permisos a la UI
+        self.apply_permissions()
+        
         self.show()
 
     def on_cell_entered(self, row, column):
@@ -3466,6 +3474,17 @@ class SchedulePlanner(QMainWindow):
 
     def open_auto_assign_modal(self):
         """Abre el modal de asignación automática."""
+        # Verificar permiso
+        if not auth_manager.has_permission(permissions.ASSIGNMENT_AUTO):
+            custom_message_box(
+                self, 
+                "Access Denied", 
+                "You do not have permission to use Automatic Assignment.", 
+                QMessageBox.Icon.Warning, 
+                QMessageBox.StandardButton.Ok
+            )
+            return
+
         dialog = AutoAssignDialog(self)
         # Pasar los horarios actuales (filtrados o todos, según lógica de negocio)
         # Aquí pasamos todos los horarios cargados
@@ -3480,8 +3499,40 @@ class SchedulePlanner(QMainWindow):
 
     def open_meeting_search_dialog(self):
         """Abre el diálogo de búsqueda de reuniones."""
+        # Verificar permiso (Redundante si la UI lo deshabilita, pero buena práctica)
+        if not auth_manager.has_permission(permissions.MEETING_SEARCH):
+            custom_message_box(
+                self, 
+                "Access Denied", 
+                "You do not have permission to search meetings.", 
+                QMessageBox.Icon.Warning, 
+                QMessageBox.StandardButton.Ok
+            )
+            return
+
         dialog = MeetingSearchDialog(self)
         dialog.exec()
+
+
+
+    def apply_permissions(self):
+        """Aplica restricciones de UI basadas en permisos."""
+
+            
+        # Auto Assign
+        # Nota: auto_assign_btn también depende de si hay datos cargados.
+        # Manejamos la visibilidad/habilitación base aquí, pero la lógica de datos puede sobreescribirlo.
+        # Mejor estrategia: Si no tiene permiso, lo ocultamos o deshabilitamos permanentemente.
+        if not auth_manager.has_permission(permissions.ASSIGNMENT_AUTO):
+            self.auto_assign_btn.setVisible(False) # Ocultar si no tiene permiso
+            # O deshabilitar y poner tooltip:
+            # self.auto_assign_btn.setEnabled(False)
+            # self.auto_assign_btn.setToolTip("Permission required")
+            
+        # Search Meetings
+        if not auth_manager.has_permission(permissions.MEETING_SEARCH):
+            self.search_meetings_btn.setEnabled(False)
+            self.search_meetings_btn.setToolTip("Permission required")
 
         
 

@@ -4,16 +4,17 @@ Gestiona autenticación de usuarios con Supabase Auth
 """
 
 from supabase import create_client, Client
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, List
 import os
+import json
 
 
 class AuthManager:
     """Gestor de autenticación con Supabase"""
     
     # Credenciales públicas de Supabase (seguras para estar en el ejecutable)
-    SUPABASE_URL = "https://glsefcxnncgzujvfkete.supabase.co"
-    SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imdsc2VmY3hubmNnenVqdmZrZXRlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQxOTU0MzgsImV4cCI6MjA3OTc3MTQzOH0.QFBHQIK-E1dyHveWcq_vn4zgvsgcsRmE4E5i4NFCM1k"
+    SUPABASE_URL = "https://cckrbcuzhglhnxwrpilt.supabase.co"
+    SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNja3JiY3V6aGdsaG54d3JwaWx0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ3Nzc1NDAsImV4cCI6MjA4MDM1MzU0MH0.-bO7CbzAoZu9bOipUwSjC1d6u1dd8867yUV_eSXyyqo"
     
     def __init__(self):
         self._supabase: Optional[Client] = None
@@ -94,24 +95,48 @@ class AuthManager:
     
     def get_user_info(self, supabase: Client, user_id: str) -> Dict:
         """
-        Obtiene información del usuario autorizado
+        Obtiene información del usuario autorizado incluyendo permisos
         
         Returns:
-            Dict con información del usuario (role, email, etc.)
+            Dict con información del usuario (role, email, permissions, etc.)
         """
         try:
-            # Obtener info de authorized_users
+            # Obtener info de authorized_users y su rol asociado
+            # Nota: Supabase-py no soporta joins anidados complejos fácilmente en una query fluida simple
+            # sin configurar foreign keys explícitas en el cliente a veces.
+            # Haremos dos queries por simplicidad y robustez inicial.
+            
+            # 1. Obtener usuario y rol
             auth_resp = supabase.table("authorized_users")\
-                .select("role")\
+                .select("role, custom_permissions")\
                 .eq("user_id", user_id)\
                 .single()\
                 .execute()
+            
+            if not auth_resp.data:
+                return {"id": user_id, "role": "user", "permissions": []}
+                
+            role_name = auth_resp.data.get("role", "user")
+            custom_perms = auth_resp.data.get("custom_permissions", []) or []
+            
+            # 2. Obtener permisos del rol
+            role_resp = supabase.table("roles")\
+                .select("permissions")\
+                .eq("name", role_name)\
+                .single()\
+                .execute()
+                
+            role_perms = role_resp.data.get("permissions", []) if role_resp.data else []
+            
+            # 3. Combinar permisos (set para eliminar duplicados)
+            all_permissions = list(set(role_perms + custom_perms))
             
             # Combinar con info de auth.users
             user_data = {
                 "id": user_id,
                 "email": self._current_user.email if self._current_user else "",
-                "role": auth_resp.data.get("role", "user") if auth_resp.data else "user"
+                "role": role_name,
+                "permissions": all_permissions
             }
             
             return user_data
@@ -121,8 +146,42 @@ class AuthManager:
             return {
                 "id": user_id,
                 "email": self._current_user.email if self._current_user else "",
-                "role": "user"
+                "role": "user",
+                "permissions": []
             }
+
+    def has_permission(self, permission: str) -> bool:
+        """
+        Verifica si el usuario actual tiene un permiso específico
+        """
+        if not self._current_user:
+            return False
+            
+        # Si ya tenemos la info del usuario cargada en memoria (podríamos optimizar esto)
+        # Por ahora, asumimos que get_user_info se llama al login y podríamos guardar el resultado.
+        # Pero auth_manager no guarda el user_info completo en self, solo _current_user (auth).
+        # Para evitar llamadas a DB en cada check, deberíamos cachear los permisos.
+        # Por simplicidad en esta iteración, consultamos get_user_info si tenemos el cliente.
+        
+        if not self._supabase:
+            return False
+            
+        try:
+            user_info = self.get_user_info(self._supabase, self._current_user.id)
+            return permission in user_info.get("permissions", [])
+        except:
+            return False
+
+    def get_permissions(self) -> List[str]:
+        """Retorna la lista de permisos del usuario actual"""
+        if not self._supabase or not self._current_user:
+            return []
+            
+        try:
+            user_info = self.get_user_info(self._supabase, self._current_user.id)
+            return user_info.get("permissions", [])
+        except:
+            return []
     
     def logout(self, supabase: Client) -> None:
         """Cierra sesión del usuario actual"""
@@ -162,6 +221,48 @@ class AuthManager:
     def create_supabase_client(cls) -> Client:
         """Crea un cliente de Supabase sin autenticación (para uso público)"""
         return create_client(cls.SUPABASE_URL, cls.SUPABASE_ANON_KEY)
+
+    def get_all_users(self) -> List[Dict]:
+        """
+        Obtiene todos los usuarios autorizados.
+        Requiere permisos de administrador (gestionado por RLS).
+        """
+        if not self._supabase:
+            return []
+            
+        try:
+            # Obtener usuarios de authorized_users
+            response = self._supabase.table("authorized_users")\
+                .select("user_id, role, custom_permissions")\
+                .execute()
+            
+            users = response.data
+            
+            # Intentar enriquecer con emails si es posible (ej. desde zoom_users si hay sync)
+            # O si tuviéramos acceso a una vista segura de auth.users
+            # Por ahora, devolvemos lo que tenemos
+            return users
+            
+        except Exception as e:
+            print(f"Error fetching users: {e}")
+            return []
+
+    def update_user_role(self, user_id: str, new_role: str) -> bool:
+        """
+        Actualiza el rol de un usuario.
+        """
+        if not self._supabase:
+            return False
+            
+        try:
+            self._supabase.table("authorized_users")\
+                .update({"role": new_role})\
+                .eq("user_id", user_id)\
+                .execute()
+            return True
+        except Exception as e:
+            print(f"Error updating user role: {e}")
+            return False
 
 
 # Instancia global del gestor
