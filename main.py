@@ -3531,8 +3531,7 @@ class SchedulePlanner(QMainWindow):
             
         # Search Meetings
         if not auth_manager.has_permission(permissions.MEETING_SEARCH):
-            self.search_meetings_btn.setEnabled(False)
-            self.search_meetings_btn.setToolTip("Permission required")
+            self.search_meetings_btn.setVisible(False)
 
         
 
