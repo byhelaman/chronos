@@ -48,7 +48,7 @@ IRRELEVANT_WORDS = re.compile(
             r"revision",
             r"evaluacion[es]?",
             # Organization / structure
-            r"grupo",
+            # r"grupo",
             r"bvp",
             r"bvs",
             r"pia",

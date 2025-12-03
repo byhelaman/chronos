@@ -720,7 +720,7 @@ class AssignmentWorker(QThread):
                 
                 # 2. Difuso (si no exacto)
                 if not found_meeting:
-                    found_meeting = utils.fuzzy_find(raw_prog, meeting_choices, threshold=70)
+                    found_meeting = utils.fuzzy_find(raw_prog, meeting_choices, threshold=75)
                 
                 # --- DETERMINAR ESTADO ---
                 if found_meeting and found_instructor:
