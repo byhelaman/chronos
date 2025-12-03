@@ -32,6 +32,10 @@ from session_manager import session_manager
 from ui_login import LoginDialog
 from version_manager import version_manager, CURRENT_VERSION as APP_VERSION
 
+# Imports del sistema de temas y componentes
+from theme_manager import theme
+from ui_components import SearchBar, FilterChip, ToastNotification, CustomButton
+
 APP_NAME = "Chronos"
 # APP_VERSION is now imported from version_manager
 
@@ -2207,7 +2211,7 @@ class SchedulePlanner(QMainWindow):
         header_widget = QWidget()
         header_layout = QVBoxLayout(header_widget)
         header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.setSpacing(4)
+        header_layout.setSpacing(2)
         
         title_label = QLabel(f"{APP_NAME}")
         title_label.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {self.COLORS['TEXT_PRIMARY']};")

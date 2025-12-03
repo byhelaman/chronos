@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, 
     QPushButton, QMessageBox, QFrame, QWidget, QCheckBox, QStyle
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QThread
+from PyQt6.QtCore import Qt, pyqtSignal, QThread, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QFont, QIcon
 from auth_manager import auth_manager
 from config_manager import config_manager
@@ -15,6 +15,8 @@ from session_manager import session_manager
 from supabase import Client
 from typing import Optional, Dict
 import utils
+from theme_manager import theme
+from ui_components import CustomButton, CustomInput, LoadingSpinner
 
 
 def show_message(parent, title, text, icon, buttons=QMessageBox.StandardButton.Ok):
@@ -39,21 +41,10 @@ def show_message(parent, title, text, icon, buttons=QMessageBox.StandardButton.O
         msg.setIcon(icon)
 
     msg.setStandardButtons(buttons)
+    msg.setStyleSheet(theme.messagebox_style())
     
-    # Estilizar botones
-    msg.setStyleSheet("""
-        QMessageBox {
-            background-color: #FFFFFF;
-            min-width: 200px;
-        }
-        QLabel {
-            color: #09090B;
-            font-family: 'IBM Plex Sans', 'Segoe UI', sans-serif;
-            font-size: 14px;
-        }
-    """)
     
-    # Botones Primarios (Ok, Yes, Save)
+    # Botones Primarios (Ok, Yes, Save) - estilo compacto
     primary_buttons = [
         QMessageBox.StandardButton.Yes,
         QMessageBox.StandardButton.Ok,
@@ -88,7 +79,7 @@ def show_message(parent, title, text, icon, buttons=QMessageBox.StandardButton.O
                 """)
                 btn.setCursor(Qt.CursorShape.PointingHandCursor)
                 
-    # Botones Secundarios (Cancel, No, Close)
+    # Botones Secundarios (Cancel, No, Close) - estilo compacto
     secondary_buttons = [
         QMessageBox.StandardButton.Cancel,
         QMessageBox.StandardButton.No,
@@ -107,7 +98,7 @@ def show_message(parent, title, text, icon, buttons=QMessageBox.StandardButton.O
                         color: #09090B;
                         border: 1px solid #E4E4E7;
                         border-radius: 6px;
-                        padding: 4px 16px;
+                        padding: 4px 8px;
                         font-family: 'IBM Plex Sans', 'Segoe UI', sans-serif;
                         font-weight: 500;
                         font-size: 14px;
@@ -154,20 +145,21 @@ class LoginDialog(QDialog):
         self.config: Dict[str, str] = {}
         self.user_info: Dict = {}
         self._login_worker: Optional[LoginWorker] = None
+        self._loading_spinner: Optional[LoadingSpinner] = None
         
         self.setWindowTitle("Chronos - Login")
-        self.setFixedSize(400, 420)
+        self.setFixedSize(400, 450)  # Tamaño más conservador
         self.setModal(True)
         self.setWindowIcon(QIcon(utils.resource_path("favicon.ico")))
         
         self._setup_ui()
-        self._apply_styles()
+        self._apply_styles()    
     
     def _setup_ui(self):
         """Configura la interfaz de usuario"""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(40, 30, 40, 30)
-        layout.setSpacing(15)
+        layout.setSpacing(15)  # Spacing original
         
         # Header (Title + Subtitle)
         header_layout = QVBoxLayout()
@@ -178,7 +170,7 @@ class LoginDialog(QDialog):
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title_font = QFont("IBM Plex Sans", 22, QFont.Weight.Bold)
         title_label.setFont(title_font)
-        title_label.setMinimumHeight(40)  # Slight adjustment for descenders
+        title_label.setMinimumHeight(40)
         title_label.setStyleSheet("margin-bottom: -4px; color: #09090B;")
         header_layout.addWidget(title_label)
         
@@ -190,7 +182,6 @@ class LoginDialog(QDialog):
         header_layout.addWidget(subtitle_label)
         
         layout.addLayout(header_layout)
-        
         layout.addSpacing(20)
         
         # Email field
@@ -205,9 +196,18 @@ class LoginDialog(QDialog):
         self.email_input = QLineEdit()
         self.email_input.setPlaceholderText("your@email.com")
         self.email_input.setFont(QFont("IBM Plex Sans", 10))
-        self.email_input.setFixedHeight(36)
+        self.email_input.setFixedHeight(36)  # Tamaño original
         self.email_input.returnPressed.connect(self._on_login)
+        self.email_input.textChanged.connect(self._validate_email)
         email_layout.addWidget(self.email_input)
+        
+        # Error label (más sutil)
+        self.email_error = QLabel("")
+        self.email_error.setFont(QFont("IBM Plex Sans", 9))
+        self.email_error.setStyleSheet("color: #EF4444;")
+        self.email_error.setVisible(False)
+        self.email_error.setWordWrap(True)
+        email_layout.addWidget(self.email_error)
         
         layout.addLayout(email_layout)
         
@@ -223,9 +223,18 @@ class LoginDialog(QDialog):
         self.password_input = QLineEdit()
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.password_input.setFont(QFont("IBM Plex Sans", 10))
-        self.password_input.setFixedHeight(36)
+        self.password_input.setFixedHeight(36)  # Tamaño original
         self.password_input.returnPressed.connect(self._on_login)
+        self.password_input.textChanged.connect(self._validate_password)
         pass_layout.addWidget(self.password_input)
+        
+        # Error label (más sutil)
+        self.password_error = QLabel("")
+        self.password_error.setFont(QFont("IBM Plex Sans", 9))
+        self.password_error.setStyleSheet("color: #EF4444;")
+        self.password_error.setVisible(False)
+        self.password_error.setWordWrap(True)
+        pass_layout.addWidget(self.password_error)
         
         layout.addLayout(pass_layout)
         
@@ -234,7 +243,6 @@ class LoginDialog(QDialog):
         self.remember_checkbox.setFont(QFont("IBM Plex Sans", 10))
         self.remember_checkbox.setChecked(True)
         self.remember_checkbox.setCursor(Qt.CursorShape.PointingHandCursor)
-        # Estilo simplificado para el checkbox
         self.remember_checkbox.setStyleSheet("""
             QCheckBox {
                 spacing: 8px;
@@ -245,7 +253,7 @@ class LoginDialog(QDialog):
         
         layout.addSpacing(16)
         
-        # Login button
+        # Login button (sin CustomButton para consistencia)
         self.login_button = QPushButton("Sign In")
         self.login_button.setFont(QFont("IBM Plex Sans", 11, QFont.Weight.Medium))
         self.login_button.setFixedHeight(36)
@@ -316,40 +324,61 @@ class LoginDialog(QDialog):
             }
         """)
     
+    def _validate_email(self, text: str):
+        """Valida el email en tiempo real."""
+        if not text:
+            self.email_error.setVisible(False)
+            return
+        
+        if "@" not in text or "." not in text:
+            self.email_error.setText("Please enter a valid email address")
+            self.email_error.setVisible(True)
+        else:
+            self.email_error.setVisible(False)
+    
+    def _validate_password(self, text: str):
+        """Valida la contraseña en tiempo real."""
+        if not text:
+            self.password_error.setVisible(False)
+            return
+        else:
+            self.password_error.setVisible(False)
+    
     def _on_login(self):
         """Maneja el evento de login"""
         email = self.email_input.text().strip()
         password = self.password_input.text()
         
-        # Basic validation
-        if not email or not password:
-            show_message(
-                self,
-                "Empty fields",
-                "Please enter your email and password",
-                QMessageBox.Icon.Warning
-            )
+        # Validación inline
+        has_error = False
+        
+        if not email:
+            self.email_error.setText("Email is required")
+            self.email_error.setVisible(True)
+            has_error = True
+        elif "@" not in email or "." not in email:
+            self.email_error.setText("Please enter a valid email address")
+            self.email_error.setVisible(True)
+            has_error = True
+        
+        if not password:
+            self.password_error.setText("Password is required")
+            self.password_error.setVisible(True)
+            has_error = True
+        
             return
         
-        # Email format validation
-        if "@" not in email or "." not in email:
-            show_message(
-                self,
-                "Invalid Email",
-                "Please enter a valid email address",
-                QMessageBox.Icon.Warning
-            )
-            return
-        
-        # Disable button during auth
+        # Deshabilitar botón
         self.login_button.setEnabled(False)
-        self.login_button.setText("Logging in...")
+        self.login_button.setText("Signing in...")
         
         # Ejecutar autenticación en thread separado
         self._login_worker = LoginWorker(email, password)
         self._login_worker.success.connect(self._on_login_success)
         self._login_worker.error.connect(self._on_login_error)
         self._login_worker.start()
+    
+
     
     def _on_login_success(self, supabase: Client, user_info: Dict):
         """Callback cuando el login es exitoso"""
@@ -377,9 +406,11 @@ class LoginDialog(QDialog):
     
     def _on_login_error(self, error_message: str):
         """Callback cuando hay error en el login"""
+        # Re-habilitar botón
         self.login_button.setEnabled(True)
         self.login_button.setText("Sign In")
         
+        # Mostrar error
         show_message(
             self,
             "Authentication Error",
