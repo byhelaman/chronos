@@ -2,30 +2,40 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
-# Virtual Environment
+*.so
+.Python
 venv/
-env/
-.env
-
-# Distribution / Build
-build/
+.venv/
+ENV/
+*.egg-info/
 dist/
-*.spec
+build/
 
-# IDEs
+# IDE
 .vscode/
 .idea/
 
-# Supabase / Secrets
-supabase/
+# Secrets / Environment
+.env
+.env.local
 config.json
 credentials.json
 
-# Logs and Databases
-*.log
-*.sqlite
+# Supabase local
+supabase/.branches/
+supabase/.temp/
 
-# OS generated files
+# Database
+*.sqlite
+*.db
+
+# OS
 .DS_Store
-*.sql
+Thumbs.db
+
+# Build artifacts
+*.exe
+*.spec
+
+# Logs
+*.log
