@@ -207,8 +207,6 @@ class AdminPage(QWizardPage):
         
         if not self.user_created:
             try:
-                self.status_lbl.setText("Creating account...")
-                
                 url = self.field("supabase_url")
                 key = self.field("supabase_key")
                 email = self.email_input.text().strip()
@@ -216,28 +214,46 @@ class AdminPage(QWizardPage):
                 
                 client = create_client(url, key)
                 
-                # Sign up - profile is created automatically by DB trigger
-                # First user becomes admin automatically
-                auth_resp = client.auth.sign_up({
-                    "email": email,
-                    "password": password
-                })
+                # Check if user already exists
+                self.status_lbl.setText("Checking if user exists...")
+                existing = client.table("user_profiles").select("email").eq("email", email).execute()
                 
-                if auth_resp.user:
-                    self.user_created = True
-                    self.status_lbl.setText("Account created!")
-                    print(f"Admin user created: {email}")
+                if existing.data:
+                    # User exists, try to sign in instead
+                    self.status_lbl.setText("User exists, signing in...")
+                    try:
+                        auth_resp = client.auth.sign_in_with_password({
+                            "email": email,
+                            "password": password
+                        })
+                        if auth_resp.user:
+                            self.user_created = True
+                            self.status_lbl.setText("Signed in!")
+                            print(f"Admin user already exists: {email}")
+                        else:
+                            raise Exception("Sign in failed")
+                    except Exception as e:
+                        self.status_lbl.setText("Wrong password or account issue")
+                        return False
                 else:
-                    raise Exception("Failed to create user")
+                    # New user, sign up
+                    self.status_lbl.setText("Creating account...")
+                    auth_resp = client.auth.sign_up({
+                        "email": email,
+                        "password": password
+                    })
+                    
+                    if auth_resp.user:
+                        self.user_created = True
+                        self.status_lbl.setText("Account created!")
+                        print(f"Admin user created: {email}")
+                    else:
+                        raise Exception("Failed to create user")
                     
             except Exception as e:
                 error_msg = str(e)
-                if "already registered" in error_msg.lower() or "already exists" in error_msg.lower():
-                    self.user_created = True
-                    self.status_lbl.setText("Account exists")
-                else:
-                    self.status_lbl.setText(f"Error: {error_msg[:50]}")
-                    return False
+                self.status_lbl.setText(f"Error: {error_msg[:50]}")
+                return False
         
         return True
 
@@ -286,6 +302,9 @@ class ZoomPage(QWizardPage):
     def initializePage(self):
         self.supabase_url = self.field("supabase_url")
         self.supabase_key = self.field("supabase_key")
+        # Disable button until status check completes
+        self.connect_btn.setEnabled(False)
+        self.connect_btn.setText("Checking...")
         self._check_status()
     
     def _check_status(self):
@@ -302,6 +321,8 @@ class ZoomPage(QWizardPage):
             self.connect_btn.setEnabled(False)
         else:
             self.status_lbl.setText("Zoom not connected yet")
+            self.connect_btn.setText("Connect Zoom Account")
+            self.connect_btn.setEnabled(True)
         self.completeChanged.emit()
     
     def _connect_zoom(self):
