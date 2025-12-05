@@ -65,6 +65,61 @@ class ZoomStatusWorker(QThread):
             self.finished.emit(False, str(e))
 
 
+class ZoomAdminCheckWorker(QThread):
+    """Check if user is admin and Zoom connection status"""
+    # Signals: is_admin, zoom_connected, message
+    finished = pyqtSignal(bool, bool, str)
+    
+    def __init__(self, url: str, key: str, email: str, password: str):
+        super().__init__()
+        self.url = url
+        self.key = key
+        self.email = email
+        self.password = password
+    
+    def run(self):
+        try:
+            import httpx
+            from supabase import create_client
+            
+            # Authenticate user
+            client = create_client(self.url, self.key)
+            auth_resp = client.auth.sign_in_with_password({
+                "email": self.email,
+                "password": self.password
+            })
+            
+            if not auth_resp.user:
+                self.finished.emit(False, False, "Auth failed")
+                return
+            
+            user_id = auth_resp.user.id
+            
+            # Check user role
+            role_resp = client.table("user_profiles").select("role").eq("user_id", user_id).single().execute()
+            is_admin = role_resp.data.get("role") == "admin" if role_resp.data else False
+            
+            # Check Zoom status
+            zoom_response = httpx.get(
+                f"{self.url}/functions/v1/zoom-oauth?action=status",
+                headers={"apikey": self.key},
+                timeout=10.0
+            )
+            
+            zoom_connected = False
+            zoom_msg = ""
+            if zoom_response.status_code == 200:
+                data = zoom_response.json()
+                if data.get("configured"):
+                    zoom_connected = True
+                    zoom_msg = data.get('updated_at', 'N/A')
+            
+            self.finished.emit(is_admin, zoom_connected, zoom_msg)
+            
+        except Exception as e:
+            self.finished.emit(False, False, str(e))
+
+
 class WelcomePage(QWizardPage):
     """Welcome page"""
     
@@ -97,7 +152,7 @@ class SupabasePage(QWizardPage):
     def __init__(self):
         super().__init__()
         self.setTitle("Supabase Configuration")
-        self.setSubTitle("Connect to your Supabase project.")
+        self.setSubTitle("Connect to Supabase project.")
         
         self.connection_tested = False
         
@@ -168,9 +223,10 @@ class AdminPage(QWizardPage):
     def __init__(self):
         super().__init__()
         self.setTitle("Your Account")
-        self.setSubTitle("Sign in with your existing account or create a new one.")
+        self.setSubTitle("Sign in or create account.")
         
         self.user_created = False
+        self.user_role = "user"  # Default role
         
         layout = QVBoxLayout()
         
@@ -203,9 +259,6 @@ class AdminPage(QWizardPage):
         if len(self.pass_input.text()) < 6:
             QMessageBox.warning(self, "Error", "Password must be at least 6 characters.")
             return False
-        if self.pass_input.text() != self.confirm_input.text():
-            QMessageBox.warning(self, "Error", "Passwords do not match.")
-            return False
         
         if not self.user_created:
             try:
@@ -216,7 +269,7 @@ class AdminPage(QWizardPage):
                 
                 client = create_client(url, key)
                 
-                # Try sign in first (handles case where user exists but config was deleted)
+                # Try sign in first (handles case where user exists)
                 self.status_lbl.setText("Checking account...")
                 try:
                     auth_resp = client.auth.sign_in_with_password({
@@ -226,12 +279,27 @@ class AdminPage(QWizardPage):
                     if auth_resp.user:
                         self.user_created = True
                         self.status_lbl.setText("Signed in!")
-                        print(f"User signed in: {email}")
+                        # Save config now that user is authenticated
+                        config.save(url, key)
+                        config.save_email(email)
+                        # Get user role
+                        try:
+                            role_resp = client.table("user_profiles").select("role").eq("user_id", auth_resp.user.id).single().execute()
+                            self.user_role = role_resp.data.get("role", "user") if role_resp.data else "user"
+                        except:
+                            self.user_role = "user"
+                        print(f"User signed in: {email} (role: {self.user_role})")
                         return True
                 except Exception as sign_in_error:
                     error_str = str(sign_in_error).lower()
+                    
                     # Only create new user if credentials are invalid (user doesn't exist)
                     if "invalid login credentials" in error_str:
+                        # Validate confirm password ONLY for new accounts
+                        if self.pass_input.text() != self.confirm_input.text():
+                            QMessageBox.warning(self, "Error", "Passwords do not match.")
+                            return False
+                        
                         # User doesn't exist, create new account
                         self.status_lbl.setText("Creating account...")
                         auth_resp = client.auth.sign_up({
@@ -242,7 +310,16 @@ class AdminPage(QWizardPage):
                         if auth_resp.user:
                             self.user_created = True
                             self.status_lbl.setText("Account created!")
-                            print(f"New user created: {email}")
+                            # Save config now that user is created
+                            config.save(url, key)
+                            config.save_email(email)
+                            # New user gets role from trigger (first user = admin)
+                            try:
+                                role_resp = client.table("user_profiles").select("role").eq("user_id", auth_resp.user.id).single().execute()
+                                self.user_role = role_resp.data.get("role", "user") if role_resp.data else "user"
+                            except:
+                                self.user_role = "admin"  # First user is admin
+                            print(f"New user created: {email} (role: {self.user_role})")
                             return True
                         else:
                             raise Exception("Failed to create user")
@@ -260,7 +337,7 @@ class AdminPage(QWizardPage):
 
 
 class ZoomPage(QWizardPage):
-    """Connect Zoom account"""
+    """Connect Zoom account - Only admins can connect"""
     
     def __init__(self):
         super().__init__()
@@ -268,13 +345,15 @@ class ZoomPage(QWizardPage):
         self.setSubTitle("Authorize Chronos to access your Zoom account.")
         
         self.zoom_connected = False
+        self.is_admin = False
         self.supabase_url = ""
         self.supabase_key = ""
         self.access_token = ""
         
         layout = QVBoxLayout()
         
-        info = QLabel(
+        # Info for admins
+        self.admin_info = QLabel(
             "Before connecting, make sure you have:\n\n"
             "1. Created a Zoom OAuth App in Zoom Marketplace\n"
             "2. Set the Redirect URI to:\n"
@@ -282,8 +361,19 @@ class ZoomPage(QWizardPage):
             "3. Added ZOOM_CLIENT_ID and ZOOM_CLIENT_SECRET\n"
             "   to your Supabase Edge Function secrets"
         )
-        info.setWordWrap(True)
-        layout.addWidget(info)
+        self.admin_info.setWordWrap(True)
+        layout.addWidget(self.admin_info)
+        
+        # Warning for non-admins
+        self.non_admin_info = QLabel(
+            "Only administrators can connect Zoom.\n\n"
+            "Zoom is configured at the organization level.\n"
+            "Contact your administrator to set up Zoom integration."
+        )
+        self.non_admin_info.setWordWrap(True)
+        self.non_admin_info.setStyleSheet("color: #71717A; padding: 20px 0;")
+        self.non_admin_info.setVisible(False)
+        layout.addWidget(self.non_admin_info)
         
         btn_layout = QHBoxLayout()
         self.connect_btn = QPushButton("Connect Zoom Account")
@@ -295,7 +385,8 @@ class ZoomPage(QWizardPage):
         self.status_lbl = QLabel("")
         layout.addWidget(self.status_lbl)
         
-        layout.addWidget(QLabel("You can skip this step and configure Zoom later."))
+        self.skip_info = QLabel("You can skip this step and configure Zoom later.")
+        layout.addWidget(self.skip_info)
         
         layout.addStretch()
         self.setLayout(layout)
@@ -303,27 +394,51 @@ class ZoomPage(QWizardPage):
     def initializePage(self):
         self.supabase_url = self.field("supabase_url")
         self.supabase_key = self.field("supabase_key")
+        
+        # Get role from AdminPage (already authenticated)
+        admin_page = self.wizard().page(2)  # AdminPage is page index 2
+        self.is_admin = getattr(admin_page, 'user_role', 'user') == 'admin'
+        
         # Disable button until status check completes
         self.connect_btn.setEnabled(False)
         self.connect_btn.setText("Checking...")
-        self._check_status()
+        
+        # Only check Zoom status (role already known)
+        self._check_zoom_status()
     
-    def _check_status(self):
+    def _check_zoom_status(self):
+        """Check if Zoom is connected"""
         self.status_lbl.setText("Checking Zoom status...")
+        
         self.worker = ZoomStatusWorker(self.supabase_url, self.supabase_key)
-        self.worker.finished.connect(self._on_status)
+        self.worker.finished.connect(self._on_zoom_status)
         self.worker.start()
     
-    def _on_status(self, connected, msg):
+    def _on_zoom_status(self, connected, msg):
+        self.zoom_connected = connected
+        
         if connected:
-            self.status_lbl.setText(f"Zoom is connected! ({msg})")
-            self.zoom_connected = True
+            # Zoom already connected
+            self.status_lbl.setText(f"✓ Zoom is connected! ({msg})")
             self.connect_btn.setText("Connected")
             self.connect_btn.setEnabled(False)
-        else:
+            self.admin_info.setVisible(True)
+            self.non_admin_info.setVisible(False)
+        elif self.is_admin:
+            # Admin can connect Zoom
             self.status_lbl.setText("Zoom not connected yet")
             self.connect_btn.setText("Connect Zoom Account")
             self.connect_btn.setEnabled(True)
+            self.admin_info.setVisible(True)
+            self.non_admin_info.setVisible(False)
+        else:
+            # Non-admin cannot connect
+            self.status_lbl.setText("")
+            self.connect_btn.setVisible(False)
+            self.admin_info.setVisible(False)
+            self.non_admin_info.setVisible(True)
+            self.skip_info.setText("Click Next to continue.")
+        
         self.completeChanged.emit()
     
     def _connect_zoom(self):
@@ -460,42 +575,5 @@ class SetupWizard(QWizard):
     
     def _on_finished(self, result):
         if result == QWizard.DialogCode.Accepted:
-            self._save()
-    
-    def _save(self):
-        url = self.field("supabase_url")
-        key = self.field("supabase_key")
-        email = self.field("admin_email")
-        password = self.field("admin_password")
-        
-        try:
-            config.save(url, key)
-            
-            client = create_client(url, key)
-            
-            try:
-                auth_resp = client.auth.sign_in_with_password({
-                    "email": email,
-                    "password": password
-                })
-                user_id = auth_resp.user.id
-                print(f"Admin user already exists: {email}")
-            except Exception:
-                auth_resp = client.auth.sign_up({
-                    "email": email,
-                    "password": password
-                })
-                if auth_resp.user:
-                    user_id = auth_resp.user.id
-                    print(f"Admin user created: {email}")
-                else:
-                    raise Exception("Failed to create user")
-            
-            # Profile is auto-created by database trigger
-            
-        except Exception as e:
-            QMessageBox.warning(
-                self,
-                "Setup Warning",
-                f"Configuration saved but there was an issue:\n{str(e)}"
-            )
+            email = self.field("admin_email")
+            print(f"✓ Configuration saved for: {email}")

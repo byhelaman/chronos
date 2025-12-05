@@ -596,9 +596,6 @@ class SchedulePlanner(QMainWindow):
         self.filter_timer.timeout.connect(self._apply_filters)
         
         self.init_ui()
-        
-        # Iniciar chequeo de actualizaciones
-        QTimer.singleShot(2000, self.check_updates)
 
     def init_ui(self):
         """Inicializa la interfaz de usuario con estilo Shadcn."""
