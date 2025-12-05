@@ -214,41 +214,40 @@ class AdminPage(QWizardPage):
                 
                 client = create_client(url, key)
                 
-                # Check if user already exists
-                self.status_lbl.setText("Checking if user exists...")
-                existing = client.table("user_profiles").select("email").eq("email", email).execute()
-                
-                if existing.data:
-                    # User exists, try to sign in instead
-                    self.status_lbl.setText("User exists, signing in...")
-                    try:
-                        auth_resp = client.auth.sign_in_with_password({
-                            "email": email,
-                            "password": password
-                        })
-                        if auth_resp.user:
-                            self.user_created = True
-                            self.status_lbl.setText("Signed in!")
-                            print(f"Admin user already exists: {email}")
-                        else:
-                            raise Exception("Sign in failed")
-                    except Exception as e:
-                        self.status_lbl.setText("Wrong password or account issue")
-                        return False
-                else:
-                    # New user, sign up
-                    self.status_lbl.setText("Creating account...")
-                    auth_resp = client.auth.sign_up({
+                # Try sign in first (handles case where user exists but config was deleted)
+                self.status_lbl.setText("Checking account...")
+                try:
+                    auth_resp = client.auth.sign_in_with_password({
                         "email": email,
                         "password": password
                     })
-                    
                     if auth_resp.user:
                         self.user_created = True
-                        self.status_lbl.setText("Account created!")
-                        print(f"Admin user created: {email}")
+                        self.status_lbl.setText("Signed in!")
+                        print(f"User signed in: {email}")
+                        return True
+                except Exception as sign_in_error:
+                    error_str = str(sign_in_error).lower()
+                    # Only create new user if credentials are invalid (user doesn't exist)
+                    if "invalid login credentials" in error_str:
+                        # User doesn't exist, create new account
+                        self.status_lbl.setText("Creating account...")
+                        auth_resp = client.auth.sign_up({
+                            "email": email,
+                            "password": password
+                        })
+                        
+                        if auth_resp.user:
+                            self.user_created = True
+                            self.status_lbl.setText("Account created!")
+                            print(f"New user created: {email}")
+                            return True
+                        else:
+                            raise Exception("Failed to create user")
                     else:
-                        raise Exception("Failed to create user")
+                        # Wrong password or other error
+                        self.status_lbl.setText("Wrong password or account issue")
+                        return False
                     
             except Exception as e:
                 error_msg = str(e)
@@ -427,7 +426,7 @@ class CompletePage(QWizardPage):
         email = self.field("admin_email")
         self.summary.setText(
             f"Supabase connected\n"
-            f"Admin account created: {email}\n"
+            f"Account created: {email}\n"
             f"Configuration saved\n\n"
             f"Click Finish to start using Chronos!"
         )
@@ -473,7 +472,7 @@ class SetupWizard(QWizard):
                 })
                 user_id = auth_resp.user.id
                 print(f"Admin user already exists: {email}")
-            except:
+            except Exception:
                 auth_resp = client.auth.sign_up({
                     "email": email,
                     "password": password

@@ -59,7 +59,7 @@ class AuthService:
                 raise Exception("User not authorized to access this application")
             
             # Get user info with permissions
-            user_info = self._get_user_info(supabase, user.id)
+            user_info = self.get_user_info(supabase, user.id)
             self._user_info = user_info
             
             return supabase, user_info
@@ -85,7 +85,7 @@ class AuthService:
             print(f"Error checking authorization: {e}")
             return False
     
-    def _get_user_info(self, supabase: Client, user_id: str) -> Dict:
+    def get_user_info(self, supabase: Client, user_id: str) -> Dict:
         """Get user info including role and permissions"""
         try:
             # Get user profile with role
@@ -156,8 +156,8 @@ class AuthService:
         if not self._current_user:
             try:
                 self._current_user = client.auth.get_user().user
-            except:
-                pass
+            except Exception:
+                pass  # Usuario no disponible, mantener None
     
     def set_user_info(self, user_info: Dict) -> None:
         """Set user info (for session restore)"""

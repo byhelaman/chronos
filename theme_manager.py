@@ -11,6 +11,11 @@ from PyQt6.QtWidgets import QApplication
 class ThemeManager:
     """Gestor centralizado de temas para mantener consistencia visual."""
     
+    def __init__(self):
+        # Exponer colores como atributos accesibles por punto (ej: theme.colors.primary)
+        # Se convierten a minúsculas para facilitar el uso
+        self.colors = type('Colors', (), {k.lower(): v for k, v in self.COLORS.items()})()
+
     # ============================================================================
     # PALETA DE COLORES
     # ============================================================================

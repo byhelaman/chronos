@@ -1,53 +1,47 @@
 """
 Chronos - Permissions Definitions
-Define los permisos granulares y los roles por defecto.
+Must match the permissions in schema.sql roles table.
 """
 
 # --- Permission Constants ---
+# These must match exactly what's in the database
 
-# Assignment Permissions
-ASSIGNMENT_AUTO = "assignment:auto"        # Acceso a asignación automática
-ASSIGNMENT_MANUAL = "assignment:manual"    # Acceso a asignación manual
-ASSIGNMENT_VIEW = "assignment:view"        # Ver asignaciones
+# Schedule Permissions
+VIEW_SCHEDULES = "view_schedules"
+EDIT_SCHEDULES = "edit_schedules"
 
 # Meeting Permissions
-MEETING_SEARCH = "meeting:search"          # Buscar reuniones
-MEETING_CREATE = "meeting:create"          # Crear reuniones
-MEETING_UPDATE = "meeting:update"          # Actualizar reuniones
-MEETING_DELETE = "meeting:delete"          # Eliminar reuniones
+VIEW_MEETINGS = "view_meetings"
 
-# User Management Permissions
-USER_MANAGE = "user:manage"                # Gestionar usuarios (admin)
-USER_VIEW = "user:view"                    # Ver usuarios
+# Assignment Permissions
+AUTO_ASSIGN = "auto_assign"
+MEETING_SEARCH = "meeting_search"
+CREATE_LINKS = "create_links"
 
-# System Permissions
-SYSTEM_CONFIG = "system:config"            # Configuración del sistema
-SYSTEM_LOGS = "system:logs"                # Ver logs
+# Admin wildcard
+ALL = "*"
 
 # --- Default Roles Configuration ---
+# Mirror of what's in schema.sql
 
 DEFAULT_ROLES = {
-    "admin": [
-        ASSIGNMENT_AUTO,
-        ASSIGNMENT_MANUAL,
-        ASSIGNMENT_VIEW,
+    "admin": [ALL],  # Full access
+    "manager": [
+        VIEW_SCHEDULES,
+        EDIT_SCHEDULES,
+        VIEW_MEETINGS,
+        AUTO_ASSIGN,
         MEETING_SEARCH,
-        MEETING_CREATE,
-        MEETING_UPDATE,
-        MEETING_DELETE,
-        USER_MANAGE,
-        USER_VIEW,
-        SYSTEM_CONFIG,
-        SYSTEM_LOGS
+        CREATE_LINKS
     ],
     "user": [
-        ASSIGNMENT_VIEW,
-        MEETING_SEARCH,
-        MEETING_CREATE,
-        MEETING_UPDATE
-    ],
-    "viewer": [
-        ASSIGNMENT_VIEW,
-        MEETING_SEARCH
+        VIEW_SCHEDULES,
     ]
 }
+
+
+def has_permission(user_permissions: list, required: str) -> bool:
+    """Check if user has the required permission."""
+    if ALL in user_permissions:
+        return True
+    return required in user_permissions

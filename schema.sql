@@ -277,8 +277,8 @@ CREATE INDEX IF NOT EXISTS idx_zoom_events_created_at ON zoom_events(created_at)
 
 INSERT INTO roles (name, permissions, description) VALUES
   ('admin', '["*"]'::jsonb, 'Full access'),
-  ('manager', '["view_schedules", "edit_schedules", "view_meetings", "auto_assign"]'::jsonb, 'Manage schedules'),
-  ('user', '["view_schedules", "view_meetings"]'::jsonb, 'Read-only')
+  ('manager', '["view_schedules", "edit_schedules", "view_meetings", "auto_assign", "meeting_search", "create_links"]'::jsonb, 'Manage schedules'),
+  ('user', '["view_schedules"]'::jsonb, 'Read-only')
 ON CONFLICT (name) DO UPDATE SET 
   permissions = EXCLUDED.permissions,
   description = EXCLUDED.description;

@@ -18,7 +18,7 @@ def parse_version(v: str) -> tuple:
     """Parsea versión 'X.Y.Z' a tupla de enteros para comparación."""
     try:
         return tuple(map(int, v.split(".")))
-    except:
+    except ValueError:
         return (0, 0, 0)
 
 class VersionManager(QObject):

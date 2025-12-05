@@ -1,30 +1,32 @@
 """
 Chronos v2 - Session Service
 Manages session persistence for auto-login.
-NO ENCRYPTION - Supabase tokens are already signed and secure.
+SECURE STORAGE - Uses system keyring for token storage.
 """
 
 import json
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Optional, Tuple, Dict
+import keyring
 
 from supabase import create_client, Client
 
-from app.config import config, AppConfig
+from app.config import config
 
 
 class SessionService:
-    """Session persistence manager"""
+    """Session persistence manager using system keyring"""
     
     SESSION_DURATION_DAYS = 7
+    SERVICE_NAME = "ChronosApp"
+    USERNAME = "session_data"
     
     def __init__(self):
-        self.session_path = AppConfig.get_session_path()
+        pass
     
     def save_session(self, supabase: Client, user_info: Dict) -> None:
         """
-        Save current session for future use.
+        Save current session securely.
         
         Args:
             supabase: Authenticated Supabase client
@@ -35,8 +37,7 @@ class SessionService:
             if not session:
                 return
             
-            # Session data - NO encryption needed
-            # Supabase tokens are already signed JWTs
+            # Session data
             session_data = {
                 "access_token": session.access_token,
                 "refresh_token": session.refresh_token,
@@ -46,36 +47,33 @@ class SessionService:
                 "expires_session_at": (datetime.now() + timedelta(days=self.SESSION_DURATION_DAYS)).isoformat()
             }
             
-            # Ensure directory exists
-            self.session_path.parent.mkdir(parents=True, exist_ok=True)
+            # Save to keyring
+            json_str = json.dumps(session_data)
+            keyring.set_password(self.SERVICE_NAME, self.USERNAME, json_str)
             
-            # Save as plain JSON
-            with open(self.session_path, 'w') as f:
-                json.dump(session_data, f)
-            
-            print(f"✓ Session saved (expires in {self.SESSION_DURATION_DAYS} days)")
+            print(f"✓ Session saved securely (expires in {self.SESSION_DURATION_DAYS} days)")
         
         except Exception as e:
             print(f"Warning: Could not save session: {e}")
     
     def load_session(self) -> Optional[Tuple[Client, Dict]]:
         """
-        Load and validate saved session.
+        Load and validate saved session from keyring.
         
         Returns:
             Tuple (supabase_client, user_info) if session is valid
             None if no session or expired
         """
         try:
-            if not self.session_path.exists():
-                return None
-            
             if not config.is_configured():
                 return None
             
-            # Read session
-            with open(self.session_path, 'r') as f:
-                session_data = json.load(f)
+            # Read session from keyring
+            json_str = keyring.get_password(self.SERVICE_NAME, self.USERNAME)
+            if not json_str:
+                return None
+                
+            session_data = json.loads(json_str)
             
             # Check session expiry
             expires_session_at = datetime.fromisoformat(session_data["expires_session_at"])
@@ -104,12 +102,30 @@ class SessionService:
                     self.clear_session()
                     return None
                 
+                # Check if tokens rotated and save if needed
+                if (current_session.access_token != session_data["access_token"] or 
+                    current_session.refresh_token != session_data["refresh_token"]):
+                    print("Tokens rotated, updating secure storage...")
+                    self.save_session(supabase, session_data["user_info"])
+                
             except Exception as e:
                 print(f"Could not restore session: {e}")
                 self.clear_session()
                 return None
             
-            user_info = session_data["user_info"]
+            # Refresh user info from database to ensure permissions are up to date
+            try:
+                from app.services.auth_service import auth_service
+                user_info = auth_service.get_user_info(supabase, session_data["user_info"]["id"])
+                
+                # Update session data with fresh user info
+                if user_info != session_data["user_info"]:
+                    print("User info updated, saving session...")
+                    self.save_session(supabase, user_info)
+            except Exception as e:
+                print(f"Warning: Could not refresh user info: {e}")
+                user_info = session_data["user_info"]
+            
             print(f"✓ Session restored for {user_info.get('email', 'user')}")
             
             return supabase, user_info
@@ -122,15 +138,16 @@ class SessionService:
     def clear_session(self) -> None:
         """Delete saved session"""
         try:
-            if self.session_path.exists():
-                self.session_path.unlink()
-                print("✓ Session cleared")
+            keyring.delete_password(self.SERVICE_NAME, self.USERNAME)
+            print("✓ Session cleared")
+        except keyring.errors.PasswordDeleteError:
+            pass # Password not found, that's fine
         except Exception as e:
             print(f"Error clearing session: {e}")
     
     def has_saved_session(self) -> bool:
         """Check if a saved session exists"""
-        return self.session_path.exists()
+        return keyring.get_password(self.SERVICE_NAME, self.USERNAME) is not None
 
 
 # Global instance

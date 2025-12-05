@@ -1,15 +1,15 @@
 """
-Chronos v2 - Schedule Model
-Represents a single schedule entry.
+Chronos - Schedule Model
+Representa una entrada individual de horario.
 """
 
 from dataclasses import dataclass, asdict
-from typing import List, Optional
+from typing import List
 
 
 @dataclass
 class Schedule:
-    """Represents a single schedule entry."""
+    """Representa una única entrada de horario."""
     date: str
     shift: str
     area: str
@@ -22,16 +22,16 @@ class Schedule:
     units: int
 
     def to_dict(self) -> dict:
-        """Convert to dictionary."""
+        """Convierte el schedule a diccionario."""
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict) -> 'Schedule':
-        """Create from dictionary."""
+    def from_dict(cls, data: dict) -> "Schedule":
+        """Crea un Schedule desde un diccionario."""
         return cls(**data)
 
     def to_list(self) -> List:
-        """Convert to list for export/clipboard (internal snake_case format)."""
+        """Convierte a lista para exportar/copiar (formato interno/snake_case)."""
         return [
             self.date, self.shift, self.area, self.start_time,
             self.end_time, self.code, self.instructor, self.program,
@@ -39,7 +39,7 @@ class Schedule:
         ]
     
     def to_list_display(self) -> List:
-        """Convert to list for table display (24h format)."""
+        """Convierte a lista para mostrar en tabla (formato 24h)."""
         return [
             self.date, self.shift, self.area, 
             self._convert_to_24h(self.start_time),
@@ -49,25 +49,32 @@ class Schedule:
         ]
     
     def _convert_to_24h(self, time_12h: str) -> str:
-        """Convert time from 12h to 24h format."""
+        """Convierte hora de formato 12h a 24h."""
         try:
+            # Manejar múltiples horarios separados por coma
             if ',' in time_12h:
                 times = time_12h.split(',')
                 converted = [self._convert_single_time_to_24h(t.strip()) for t in times]
                 return ', '.join(converted)
             else:
                 return self._convert_single_time_to_24h(time_12h)
-        except:
-            return time_12h
-
+        except (ValueError, AttributeError):
+            return time_12h  # Retornar original si hay error de formato
+    
     def _convert_single_time_to_24h(self, time_str: str) -> str:
-        """Convert a single time string from 12h to 24h format."""
+        """Convierte un solo horario de 12h a 24h."""
         try:
+            # Remover espacios y convertir a mayúsculas
             time_str = time_str.strip().upper()
+            
+            # Detectar AM/PM
             is_pm = 'PM' in time_str
             is_am = 'AM' in time_str
+            
+            # Extraer la hora
             time_clean = time_str.replace('AM', '').replace('PM', '').strip()
             
+            # Parsear hora:minutos
             if ':' in time_clean:
                 hours, minutes = time_clean.split(':')
                 hours = int(hours)
@@ -76,22 +83,23 @@ class Schedule:
                 hours = int(time_clean)
                 minutes = 0
             
+            # Convertir a 24h
             if is_pm and hours != 12:
                 hours += 12
             elif is_am and hours == 12:
                 hours = 0
             
             return f"{hours:02d}:{minutes:02d}"
-        except:
-            return time_str
-
+        except (ValueError, AttributeError):
+            return time_str  # Retornar original si hay error de parsing
+    
     def __hash__(self):
-        """Hash for efficient O(1) comparisons."""
+        """Hash para comparaciones eficientes O(1)."""
         return hash((self.date, self.shift, self.area, self.start_time, 
                      self.end_time, self.code, self.instructor, self.program))
     
     def __eq__(self, other):
-        """Optimized equality comparison."""
+        """Comparación de igualdad optimizada."""
         if not isinstance(other, Schedule):
             return False
         return (self.date == other.date and 

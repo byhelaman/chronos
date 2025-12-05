@@ -50,6 +50,7 @@ IRRELEVANT_WORDS = re.compile(
             # Organization / structure
             # r"grupo",
             r"bvp",
+            r"bvd",
             r"bvs",
             r"pia",
             r"mod",

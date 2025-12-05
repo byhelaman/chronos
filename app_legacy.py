@@ -5,6 +5,9 @@ Versión optimizada con PyQt6 para máxima performance y seguridad
 
 import sys
 import os
+import re
+import base64
+import logging
 from dataclasses import dataclass, asdict
 from typing import List, Optional, Set
 from datetime import datetime
@@ -22,8 +25,8 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal, QModelIndex, QRect, QItemSelec
 
 import pandas as pd
 from supabase import create_client, Client
-import utils  # Importar utils.py para fuzzy matching
-import httpx # Para llamadas a API de Zoom
+import httpx
+import utils
 
 # Imports del sistema de autenticación
 from auth_manager import auth_manager
@@ -32,22 +35,38 @@ from session_manager import session_manager
 from ui_login import LoginDialog
 
 from version_manager import version_manager, CURRENT_VERSION as APP_VERSION
-import permissions # Importar constantes de permisos
+import permissions
 
 # Imports del sistema de temas y componentes
 from theme_manager import theme
 from ui_components import SearchBar, FilterChip, ToastNotification, CustomButton
 
-APP_NAME = "Chronos"
-# APP_VERSION is now imported from version_manager
+# Workers (modularizados en app/workers/)
+from app.workers import ExcelWorker, AssignmentWorker, UpdateWorker, MeetingSearchWorker
 
-# Credenciales de Supabase (públicas, seguras para el ejecutable)
+# UI Delegates (modularizados en app/ui/)
+from app.ui.delegates import RowHoverDelegate, CheckBoxHeader
+
+# UI Dialogs (modularizados en app/ui/dialogs/)
+from app.ui.dialogs import AutoAssignDialog, MeetingSearchDialog, LinkCreationDialog
+
+
+APP_NAME = "Chronos"
+
+# Credenciales de Supabase
 SUPABASE_URL = auth_manager.SUPABASE_URL
 SUPABASE_KEY = auth_manager.SUPABASE_ANON_KEY
 
 # Credenciales de Zoom (se cargarán desde DB después del login)
 ZOOM_CLIENT_ID = None
 ZOOM_CLIENT_SECRET = None
+
+# Configurar logging
+logging.basicConfig(
+    level=logging.INFO, 
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -103,8 +122,8 @@ class Schedule:
                 return ', '.join(converted)
             else:
                 return self._convert_single_time_to_24h(time_12h)
-        except:
-            return time_12h  # Retornar original si hay error
+        except (ValueError, AttributeError):
+            return time_12h  # Retornar original si hay error de formato
     
     def _convert_single_time_to_24h(self, time_str: str) -> str:
         """Convierte un solo horario de 12h a 24h."""
@@ -135,8 +154,8 @@ class Schedule:
                 hours = 0
             
             return f"{hours:02d}:{minutes:02d}"
-        except:
-            return time_str  # Retornar original si hay error
+        except (ValueError, AttributeError):
+            return time_str  # Retornar original si hay error de parsing
     
     def __hash__(self):
         """Hash para comparaciones eficientes O(1)."""
@@ -157,11 +176,9 @@ class Schedule:
                 self.program == other.program)
 
 
-import base64
-
 def refresh_zoom_token(supabase: Client) -> str:
     """Refresca el token de Zoom usando el refresh_token almacenado."""
-    print("DEBUG: Refreshing Zoom Token...")
+    logger.debug("Refreshing Zoom Token...")
     
     # 1. Obtener refresh_token actual
     # Optimización: Seleccionar solo campos necesarios en lugar de *
@@ -211,14 +228,12 @@ def refresh_zoom_token(supabase: Client) -> str:
         "updated_at": datetime.now().isoformat()
     }).eq("id", record["id"]).execute()
     
-    print("DEBUG: Token refreshed successfully")
+    logger.info("Zoom token refreshed successfully")
     return new_access_token
 
 # ============================================================================
-# UTILIDADES (copiadas del código original)
+# UTILIDADES
 # ============================================================================
-
-import re
 
 def extract_parenthesized_schedule(text: str) -> str:
     matches = re.findall(r"\((.*?)\)", str(text))
@@ -291,7 +306,7 @@ def parse_excel_file(file_path: str) -> List[Schedule]:
                 # Columna 17 es 'group_name' (índice 17 en iloc)
                 try:
                     group_counts = df.iloc[6:, 17].value_counts().to_dict()
-                except:
+                except (KeyError, IndexError):
                     group_counts = {}
 
                 # Usar itertuples para iteración rápida (index=False devuelve tuplas con valores)
@@ -417,7 +432,7 @@ def detect_file_type(file_path: str) -> str:
             return "exported"
         else:
             return "original"
-    except:
+    except Exception:
         return "original"  # Por defecto asumir original
 
 
@@ -535,1580 +550,6 @@ def custom_message_box(parent, title, text, icon, buttons):
     return msg.exec()
 
 
-# ============================================================================
-# WORKER THREAD PARA PROCESAMIENTO ASÍNCRONO
-# ============================================================================
-
-class ExcelWorker(QThread):
-    """Worker thread para procesar archivos Excel sin bloquear la UI."""
-    progress = pyqtSignal(str)
-    finished = pyqtSignal(list, list)  # schedules, errors
-
-    def __init__(self, file_paths: List[str]):
-        super().__init__()
-        self.file_paths = file_paths
-
-    def run(self):
-        all_schedules = []
-        errors = []
-
-        for i, file_path in enumerate(self.file_paths):
-            self.progress.emit(f"Processing {i+1}/{len(self.file_paths)}: {os.path.basename(file_path)}")
-            try:
-                # Detectar tipo de archivo
-                file_type = detect_file_type(file_path)
-                
-                if file_type == "exported":
-                    # Archivo ya procesado (exportado)
-                    schedules = parse_exported_excel_file(file_path)
-                else:
-                    # Archivo original
-                    schedules = parse_excel_file(file_path)
-                
-                all_schedules.extend(schedules)
-            except Exception as e:
-                errors.append(f"{os.path.basename(file_path)}: {str(e)}")
-
-        self.finished.emit(all_schedules, errors)
-
-
-class AssignmentWorker(QThread):
-    """Worker thread para procesar la asignación automática de reuniones."""
-    progress = pyqtSignal(str)
-    finished = pyqtSignal(list, list)  # results, errors
-
-    def __init__(self, schedules: List[Schedule]):
-        super().__init__()
-        self.schedules = schedules
-
-    def run(self):
-        print("DEBUG: AssignmentWorker started")
-        results = []
-        errors = []
-        
-        try:
-            self.progress.emit("Connecting to Supabase...")
-            print(f"DEBUG: Connecting to Supabase... URL={SUPABASE_URL}")
-            if not SUPABASE_URL or not SUPABASE_KEY:
-                raise Exception("Missing SUPABASE_URL or SUPABASE_KEY in .env")
-            
-            supabase: Client = auth_manager.get_client()
-            
-            # 1. Fetch Zoom Users
-            self.progress.emit("Fetching Zoom Users...")
-            # Ahora traemos display_name directamente de la BD
-            users_response = supabase.table("zoom_users").select("id, first_name, last_name, display_name, email").execute()
-            
-            # Diccionarios para búsqueda rápida de usuarios
-            users_by_id = {}
-            users_by_name = {} # Clave canónica -> User Data
-            
-            for u in users_response.data:
-                uid = u["id"]
-                # Usar display_name si existe, sino construirlo
-                dname = u.get("display_name")
-                fname = u.get("first_name", "").strip()
-                lname = u.get("last_name", "").strip()
-                full_name = f"{fname} {lname}".strip()
-                
-                if not dname:
-                    dname = full_name
-                
-                u["display_name"] = dname
-                u["full_name"] = full_name # Guardar nombre completo real
-                
-                users_by_id[uid] = u
-                
-                # Indexar por Display Name (Canónico)
-                c_dname = utils.canonical(dname)
-                if c_dname:
-                    users_by_name[c_dname] = u
-                    
-                # Indexar TAMBIÉN por Full Name (Canónico) si es diferente
-                c_fullname = utils.canonical(full_name)
-                if c_fullname and c_fullname != c_dname:
-                    users_by_name[c_fullname] = u
-            
-            # 2. Fetch Zoom Meetings
-            self.progress.emit("Fetching Zoom Meetings...")
-        
-            zoom_meetings = []
-            page_size = 1000
-            offset = 0
-            
-            # Optimización: Seleccionar solo campos necesarios en lugar de *
-            # Esto reduce significativamente la transferencia de datos
-            while True:
-                response = supabase.table("zoom_meetings")\
-                    .select("meeting_id, topic, host_id")\
-                    .range(offset, offset + page_size - 1)\
-                    .execute()
-                if not response.data:
-                    break
-                zoom_meetings.extend(response.data)
-                if len(response.data) < page_size:
-                    break
-                offset += page_size
-                self.progress.emit(f"Fetching Zoom Meetings... ({len(zoom_meetings)} loaded)")
-                
-            self.progress.emit(f"Processing {len(self.schedules)} schedules against {len(zoom_meetings)} meetings...")
-            
-            # Diccionarios para búsqueda rápida de reuniones (Global)
-            meetings_map = {
-                "by_topic": {}, # canonical(topic) -> Meeting
-                "list": []      # Lista para fuzzy search
-            }
-        
-            for m in zoom_meetings:
-                try:
-                    # Agregar info del host para referencia rápida
-                    host_data = users_by_id.get(m.get("host_id"))
-                    m["host_name"] = host_data.get("display_name", "Unknown") if host_data else "Unknown"
-                    
-                    topic = m.get("topic", "")
-                    c_topic = utils.canonical(topic)
-                    
-                    meetings_map["list"].append(m)
-                    if c_topic:
-                        # Nota: Si hay múltiples reuniones con el mismo topic, esto guardará la última procesada.
-                        # Sin filtro de fecha, asumimos que el topic es único o que cualquier coincidencia es válida.
-                        meetings_map["by_topic"][c_topic] = m
-                        
-                except Exception as e:
-                    continue
-
-            # 3. Procesar Schedules
-            
-            # --- OPTIMIZATION: Pre-compute choices for fuzzy matching ---
-            instructor_choices = {}
-            for u in users_by_id.values():
-                instructor_choices[utils.normalizar_cadena(u["display_name"])] = u
-                if u.get("full_name"):
-                    instructor_choices[utils.normalizar_cadena(u["full_name"])] = u
-            
-            meeting_choices = {utils.normalizar_cadena(m["topic"]): m for m in meetings_map["list"]}
-            # ------------------------------------------------------------
-
-            for i, schedule in enumerate(self.schedules):
-                if i % 10 == 0:
-                    self.progress.emit(f"Analyzing {i+1}/{len(self.schedules)}...")
-                
-                status = "not_found"
-                match_reason = "No match found"
-                meeting_id = ""
-                
-                # Datos del Schedule
-                raw_instr = schedule.instructor
-                raw_prog = schedule.program
-                
-                c_instr = utils.canonical(raw_instr)
-                c_prog = utils.canonical(raw_prog)
-                
-                found_meeting = None
-                found_instructor = None
-                
-                # --- BUSCAR INSTRUCTOR ---
-                # 1. Exacto
-                found_instructor = users_by_name.get(c_instr)
-                
-                # 2. Difuso (si no exacto)
-                if not found_instructor:
-                    found_instructor = utils.fuzzy_find(raw_instr, instructor_choices)
-                    # found_instructor = utils.fuzzy_find(raw_instr, choices, threshold=80)
-
-                # --- BUSCAR REUNIÓN ---
-                # 1. Exacto
-                found_meeting = meetings_map["by_topic"].get(c_prog)
-                
-                # 2. Difuso (si no exacto)
-                if not found_meeting:
-                    found_meeting = utils.fuzzy_find(raw_prog, meeting_choices, threshold=75)
-                
-                # --- DETERMINAR ESTADO ---
-                if found_meeting and found_instructor:
-                    # Ambos encontrados, verificar vínculo
-                    if found_meeting.get("host_id") == found_instructor.get("id"):
-                        status = "assigned"
-                        match_reason = "-"
-                        meeting_id = found_meeting.get("meeting_id")
-                    else:
-                        status = "to_update"
-                        match_reason = f"-"
-                        meeting_id = found_meeting.get("meeting_id")
-                        
-                elif found_meeting and not found_instructor:
-                    status = "to_update"
-                    match_reason = f"Instructor not found"
-                    meeting_id = found_meeting.get("meeting_id")
-                    
-                elif not found_meeting and found_instructor:
-                    status = "not_found"
-                    meeting_id = "-"
-                    match_reason = f"Meeting not found"
-                
-                else:
-                    status = "not_found"
-                    match_reason = "Neither Meeting nor Instructor found"
-
-                results.append({
-                    "schedule": schedule,
-                    "status": status,
-                    "meeting_id": meeting_id,
-                    "reason": match_reason,
-                    "found_instructor": found_instructor
-                })
-                
-        except Exception as e:
-            print(f"DEBUG: Error in AssignmentWorker: {e}")
-            import traceback
-            traceback.print_exc()
-            errors.append(str(e))
-            
-        self.finished.emit(results, errors)
-
-
-class UpdateWorker(QThread):
-    """Worker thread para ejecutar la reasignación en Zoom y BD."""
-    progress = pyqtSignal(str)
-    finished = pyqtSignal(list, list) # success_list, error_list
-
-    def __init__(self, assignments: List[dict]):
-        super().__init__()
-        self.assignments = assignments # List of {meeting_id, new_host_email, new_host_id, topic}
-
-    def run(self):
-        print("DEBUG: UpdateWorker started")
-        successes = []
-        errors = []
-        
-        try:
-            self.progress.emit("Connecting to Supabase...")
-            if not SUPABASE_URL or not SUPABASE_KEY:
-                raise Exception("Missing SUPABASE_URL or SUPABASE_KEY")
-            
-            supabase: Client = auth_manager.get_client()
-            
-            # 1. Obtener Token de Zoom
-            self.progress.emit("Fetching Zoom Token...")
-            token_resp = supabase.table("zoom_tokens").select("access_token").limit(1).execute()
-            if not token_resp.data:
-                raise Exception("No Zoom token found in database. Please sync first.")
-            
-            token = token_resp.data[0]["access_token"]
-            
-            # 2. Procesar Asignaciones en Paralelo
-            total = len(self.assignments)
-            completed = 0
-            
-            # Función auxiliar para ejecutar en cada hilo
-            def process_assignment(item, current_token):
-                meeting_id = item["meeting_id"]
-                new_host_email = item["new_host_email"]
-                new_host_id = item["new_host_id"]
-                topic = item.get("topic", meeting_id)
-                
-                result = {"success": False, "msg": "", "topic": topic}
-                
-                try:
-                    headers = {
-                        "Authorization": f"Bearer {current_token}",
-                        "Content-Type": "application/json"
-                    }
-                    
-                    # A. Llamada a Zoom API
-                    url = f"https://api.zoom.us/v2/meetings/{meeting_id}"
-                    body = {"schedule_for": new_host_email}
-                    
-                    resp = httpx.patch(url, headers=headers, json=body, timeout=10.0)
-                    
-                    # Manejo de token expirado (básico, no perfecto en hilos pero funcional)
-                    if resp.status_code == 401 or (resp.status_code == 400 and "Access token is expired" in resp.text):
-                        return {"success": False, "msg": "TOKEN_EXPIRED", "topic": topic}
-                    
-                    if resp.status_code == 204:
-                        # B. NO Actualizar Supabase aquí, retornar datos para batch update
-                        result["success"] = True
-                        result["msg"] = f"Updated {topic} -> {new_host_email}"
-                        result["db_update"] = {"meeting_id": meeting_id, "host_id": new_host_id}
-                    else:
-                        result["msg"] = f"Zoom API Error {resp.status_code}: {resp.text}"
-                        
-                except Exception as e:
-                    result["msg"] = str(e)
-                    
-                return result
-
-            from concurrent.futures import as_completed
-            
-            updates_to_sync = []
-            
-            # Usar ThreadPoolExecutor
-            max_workers = 10 # Ajustable según necesidad
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Iniciar tareas
-                future_to_item = {
-                    executor.submit(process_assignment, item, token): item 
-                    for item in self.assignments
-                }
-                
-                for future in as_completed(future_to_item):
-                    completed += 1
-                    res = future.result()
-                    
-                    # Manejo especial de reintento por token expirado
-                    if not res["success"] and res["msg"] == "TOKEN_EXPIRED":
-                        self.progress.emit("Token expired. Refreshing (blocking)...")
-                        try:
-                            # Refrescar token (bloqueante)
-                            token = refresh_zoom_token(supabase)
-                            # Reintentar SOLO este item
-                            item = future_to_item[future]
-                            res = process_assignment(item, token)
-                        except Exception as e:
-                            res["msg"] = f"Token Refresh Failed: {str(e)}"
-                    
-                    if res["success"]:
-                        successes.append(res["msg"])
-                        if "db_update" in res:
-                            updates_to_sync.append(res["db_update"])
-                    else:
-                        errors.append(f"{res['topic']}: {res['msg']}")
-                        
-                    self.progress.emit(f"Processed {completed}/{total}...")
-
-            # C. Actualización Masiva en Supabase
-            if updates_to_sync:
-                self.progress.emit(f"Syncing {len(updates_to_sync)} records to database...")
-                try:
-                    # Upsert en lotes de 100 para no saturar
-                    batch_size = 100
-                    for i in range(0, len(updates_to_sync), batch_size):
-                        batch = updates_to_sync[i:i + batch_size]
-                        # Usar upsert con on_conflict='meeting_id' para actualizar host_id
-                        supabase.table("zoom_meetings").upsert(batch, on_conflict="meeting_id").execute()
-                        
-                except Exception as e:
-                    errors.append(f"Database Sync Error: {str(e)}")
-                    # Si falla la BD, marcamos como error global o advertencia?
-                    # Los cambios en Zoom YA se hicieron.
-        
-        except Exception as e:
-            errors.append(f"Critical Error: {str(e)}")
-            
-        self.finished.emit(successes, errors)
-
-
-class RowHoverDelegate(QStyledItemDelegate):
-    """Delegate para resaltar la fila completa al pasar el mouse."""
-    def __init__(self, parent=None, hover_color="#F4F4F5"):
-        super().__init__(parent)
-        self.hover_color = QColor(hover_color)
-        self.hover_row = -1
-
-    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex):
-        if index.row() == self.hover_row:
-            painter.save()
-            painter.fillRect(option.rect, self.hover_color)
-            painter.restore()
-        super().paint(painter, option, index)
-
-    def createEditor(self, parent, option, index):
-        """Crea un editor de solo lectura para permitir copiar texto."""
-        # No permitir edición en columna de checkbox (0)
-        if index.column() == 0:
-            return None
-            
-        editor = QLineEdit(parent)
-        editor.setReadOnly(True)
-        editor.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu) # Deshabilitar menú contextual
-        # Fondo opaco para cubrir el texto de abajo y evitar "duplicación"
-        editor.setStyleSheet("""
-            QLineEdit {
-                border: 1px solid #E4E4E7;
-                border-radius: 4px;
-                background-color: #FFFFFF; 
-                color: #09090B;
-                selection-background-color: #18181B;
-                selection-color: #FAFAFA;
-                padding: 0 4px;
-            }
-        """)
-        return editor
-
-    def setEditorData(self, editor, index):
-        """Establece los datos en el editor y su alineación."""
-        text = index.model().data(index, Qt.ItemDataRole.DisplayRole)
-        editor.setText(str(text))
-        
-        # Sincronizar alineación
-        alignment = index.model().data(index, Qt.ItemDataRole.TextAlignmentRole)
-        if alignment:
-            # QLineEdit solo soporta alineación horizontal
-            horizontal_align = alignment & Qt.AlignmentFlag.AlignHorizontal_Mask
-            editor.setAlignment(Qt.AlignmentFlag(horizontal_align))
-
-    def updateEditorGeometry(self, editor, option, index):
-        """Ajusta el tamaño del editor al contenido del texto (fit-content)."""
-        # Obtener texto
-        text = str(index.model().data(index, Qt.ItemDataRole.DisplayRole))
-        
-        # Calcular ancho necesario usando fontMetrics
-        fm = option.fontMetrics
-        text_width = fm.horizontalAdvance(text)
-        
-        # Padding extra para el borde y margen interno (aprox 10-12px)
-        required_width = text_width + 16 
-        
-        # No exceder el ancho de la celda disponible
-        final_width = min(required_width, option.rect.width())
-        
-        # Crear el rectángulo final
-        editor_rect = QRect(option.rect)
-        editor_rect.setWidth(final_width)
-        
-        # Ajustar altura a 24px y centrar verticalmente
-        target_height = 24
-        vertical_diff = (option.rect.height() - target_height) // 2
-        editor_rect.setHeight(target_height)
-        editor_rect.moveTop(option.rect.top() + vertical_diff)
-        
-        # Ajustar alineación horizontal
-        alignment = index.model().data(index, Qt.ItemDataRole.TextAlignmentRole)
-        
-        # Por defecto a la izquierda si no hay alineación
-        if alignment is None:
-            alignment = Qt.AlignmentFlag.AlignLeft
-            
-        if alignment & Qt.AlignmentFlag.AlignHCenter:
-            # Centrar horizontalmente usando el centro exacto
-            editor_rect.moveCenter(option.rect.center())
-            # Re-ajustar top porque moveCenter cambia ambos ejes
-            editor_rect.moveTop(option.rect.top() + vertical_diff)
-        elif alignment & Qt.AlignmentFlag.AlignRight:
-            # Alinear a la derecha con un pequeño margen
-            editor_rect.moveRight(option.rect.right() - 4)
-        else:
-            # Izquierda (default) con margen para coincidir con el texto
-            editor_rect.moveLeft(option.rect.left() + 8)
-            
-        editor.setGeometry(editor_rect)
-
-    def setModelData(self, editor, model, index):
-        """No hace nada porque es solo lectura."""
-        pass
-
-
-class CheckBoxHeader(QHeaderView):
-    """Header personalizado con un checkbox en la primera columna."""
-    checkBoxClicked = pyqtSignal(bool)
-
-    def __init__(self, orientation, parent=None):
-        super().__init__(orientation, parent)
-        self.isOn = False
-
-    def paintSection(self, painter, rect, logicalIndex):
-        painter.save()
-        super().paintSection(painter, rect, logicalIndex)
-        painter.restore()
-
-        if logicalIndex == 0:
-            # Pintar un rectángulo sobre el área para ocultar el sort indicator
-            painter.fillRect(rect, QColor("#F4F4F5"))
-            # agregar border bottom
-
-            # Dibujar border bottom
-            painter.setPen(QPen(QColor("#E4E4E7"), 1))
-            painter.drawLine(rect.x(), rect.bottom(), rect.right(), rect.bottom())
-            
-            option = QStyleOptionButton()
-            option.rect = QRect(rect.x() + 15, rect.y() + 12, 20, 20)  # Ajustar posición con más padding left y superior
-            option.state = QStyle.StateFlag.State_Enabled | QStyle.StateFlag.State_Active
-            if self.isOn:
-                option.state |= QStyle.StateFlag.State_On
-            else:
-                option.state |= QStyle.StateFlag.State_Off
-            
-            self.style().drawControl(QStyle.ControlElement.CE_CheckBox, option, painter)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            # Calcular si el click fue en el área del checkbox de la primera columna
-            # O si fue en la columna 0 en general (para evitar sort)
-            
-            # Obtener el índice lógico de la sección bajo el mouse
-            logicalIndex = self.logicalIndexAt(event.position().toPoint())
-            
-            if logicalIndex == 0:
-                # Toggle checkbox
-                self.isOn = not self.isOn
-                self.checkBoxClicked.emit(self.isOn)
-                self.viewport().update()
-                # NO llamar a super().mousePressEvent(event) para evitar sort
-                return
-
-        super().mousePressEvent(event)
-
-
-# ============================================================================
-# DIÁLOGOS
-# ============================================================================
-
-class AutoAssignDialog(QDialog):
-    """Diálogo para configurar la asignación automática de reuniones."""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(f"{APP_NAME} | Auto Assign")
-        self.setModal(True)
-        self.setFixedSize(1200, 600) # Aumentar tamaño para la tabla
-        
-        # Colores (copiados de SchedulePlanner para consistencia)
-        self.COLORS = {
-            "BACKGROUND": "#FFFFFF",
-            "SURFACE": "#FFFFFF",
-            "SURFACE_SECONDARY": "#F4F4F5",
-            "BORDER": "#E4E4E7",
-            "TEXT_PRIMARY": "#09090B",
-            "TEXT_SECONDARY": "#71717A",
-            "PRIMARY": "#18181B",
-            "PRIMARY_FOREGROUND": "#FAFAFA",
-            "DESTRUCTIVE": "#EF4444",
-            "ACCENT": "#F4F4F5",
-        }
-
-        self.setStyleSheet(f"""
-            QDialog {{
-                background-color: {self.COLORS['BACKGROUND']};
-            }}
-            QLabel {{
-                font-family: 'IBM Plex Sans', sans-serif;
-                font-size: 14px;
-                color: {self.COLORS['TEXT_PRIMARY']};
-            }}
-            
-            
-            /* Estilos generales de botones para el diálogo */
-            QPushButton {{
-                font-family: 'IBM Plex Sans', sans-serif;
-                border-radius: 6px;
-                padding: 8px 16px;
-                font-weight: 500;
-                font-size: 14px;
-            }}
-            
-            /* Override específico para botones de alerta dentro del diálogo */
-            QMessageBox QPushButton {{
-                background-color: #18181B;
-                color: #FAFAFA;
-                border: 1px solid #18181B;
-                border-radius: 6px;
-                padding: 4px 8px;
-                font-weight: 500;
-                min-width: 80px;
-            }}
-            QMessageBox QPushButton:hover {{
-                background-color: #27272A;
-            }}
-        QMessageBox QPushButton:pressed {{
-            background-color: #09090B;
-        }}
-    """)
-        
-        layout = QVBoxLayout(self)
-        layout.setSpacing(20)
-        layout.setContentsMargins(24, 24, 24, 24)
-        header_layout = QVBoxLayout()
-        header_layout.setSpacing(4)
-        title = QLabel("Automatic Assignment")
-        title.setStyleSheet("font-size: 18px; font-weight: bold;")
-        desc = QLabel("Review and assign meetings automatically.")
-        desc.setStyleSheet(f"color: {self.COLORS['TEXT_SECONDARY']};")
-        header_layout.addWidget(title)
-        header_layout.addWidget(desc)
-        layout.addLayout(header_layout)
-        
-        # Table Section
-        # Filter Layout
-        filter_layout = QHBoxLayout()
-        
-        # Search Input
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Filter by Instructor...")
-        self.search_input.setMinimumWidth(200)
-        self.search_input.setStyleSheet(f"""
-            QLineEdit {{
-                font-family: 'IBM Plex Sans', sans-serif;
-                border: 1px solid {self.COLORS['BORDER']};
-                border-radius: 6px;
-                padding: 8px 12px;
-                background-color: {self.COLORS['SURFACE']};
-                color: {self.COLORS['TEXT_PRIMARY']};
-                font-size: 14px;
-            }}
-            QLineEdit:focus {{
-                border: 1px solid #18181B;
-            }}
-            QLineEdit::placeholder {{
-                color: {self.COLORS['TEXT_SECONDARY']};
-            }}
-        """)
-        self.search_input.textChanged.connect(self.filter_table)
-
-        self.filter_combo = QComboBox()
-        self.filter_combo.addItems(["All", "Assigned", "To Update", "Not Found"])
-        self.filter_combo.setFixedHeight(36)
-        self.filter_combo.setFixedWidth(150)
-        # Apply combobox style
-        self.filter_combo.setStyleSheet(f"""
-            QComboBox {{
-                font-family: 'IBM Plex Sans', sans-serif;
-                border: 1px solid {self.COLORS['BORDER']};
-                border-radius: 6px;
-                padding: 4px 8px;
-                background-color: {self.COLORS['SURFACE']};
-                color: {self.COLORS['TEXT_PRIMARY']};
-                font-size: 14px;
-            }}
-            QComboBox:hover {{
-                border: 1px solid #18181B;
-            }}
-            QComboBox:focus {{
-                border: 1px solid #18181B;
-            }}
-            QComboBox::drop-down {{
-                border: none;
-                padding-right: 8px;
-            }}
-            QComboBox::down-arrow {{
-                width: 12px;
-                height: 12px;
-            }}
-            QComboBox QAbstractItemView {{
-                font-family: 'IBM Plex Sans', sans-serif;
-                background-color: {self.COLORS['SURFACE']};
-                border: 1px solid {self.COLORS['BORDER']};
-                border-radius: 6px;
-                selection-background-color: {self.COLORS['ACCENT']};
-                selection-color: {self.COLORS['TEXT_PRIMARY']};
-                padding: 4px;
-            }}
-        """)
-        self.filter_combo.currentTextChanged.connect(self.filter_table)
-        
-        filter_layout.addWidget(self.search_input)
-        filter_layout.addWidget(QLabel("Status:"))
-        filter_layout.addWidget(self.filter_combo)
-        filter_layout.addStretch()
-        
-        layout.addLayout(filter_layout)
-
-        # Progress bar (Thinner)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        self.progress_bar.setTextVisible(False)
-        self.progress_bar.setFixedHeight(4)
-        self.progress_bar.setStyleSheet(f"""
-            QProgressBar {{
-                font-family: 'IBM Plex Sans', sans-serif;
-                border: none; background-color: {self.COLORS['SURFACE_SECONDARY']};
-                border-radius: 2px;
-            }}
-            QProgressBar::chunk {{
-                background-color: {self.COLORS['PRIMARY']}; border-radius: 2px;
-            }}
-        """)
-        layout.addWidget(self.progress_bar)
-
-        # Table
-        self.table = QTableWidget()
-        self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels([
-            "", "Status", "Meeting ID", "Time", "Instructor", "Program/Group", "Reason"
-        ])
-        
-        # Configuración de Header con Checkbox
-        self.header = CheckBoxHeader(Qt.Orientation.Horizontal, self.table)
-        self.table.setHorizontalHeader(self.header)
-        self.header.setSectionsClickable(True) # Enable sorting clicks
-        self.header.checkBoxClicked.connect(self.toggle_all_rows)
-        
-        # Configuración de tabla
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
-        self.table.setAlternatingRowColors(False)
-        self.table.setSortingEnabled(True)
-        self.table.setShowGrid(False)
-        self.table.setFrameShape(QFrame.Shape.NoFrame)
-        
-        self.table.horizontalHeader().setStretchLastSection(True) # Reason column stretch
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(45)
-        
-        # Estilo de Tabla (Mismo que main)
-        self.table.setStyleSheet(f"""
-            QTableWidget {{
-                background-color: {self.COLORS['SURFACE']};
-                border: 1px solid {self.COLORS['BORDER']};
-                border-radius: 8px;
-                gridline-color: transparent;
-                outline: none;
-                font-family: 'IBM Plex Sans', sans-serif;
-                font-size: 14px;
-            }}
-            QTableWidget::item {{
-                padding: 12px;
-                border-bottom: 1px solid {self.COLORS['BORDER']};
-                color: {self.COLORS['TEXT_PRIMARY']};
-                font-size: 14px;
-            }}
-            QTableWidget::item:selected {{
-                background-color: {self.COLORS['SURFACE_SECONDARY']};
-                color: {self.COLORS['TEXT_PRIMARY']};
-            }}
-            QHeaderView::section {{
-                background-color: #F4F4F5;
-                color: {self.COLORS['TEXT_SECONDARY']};
-                padding: 12px;
-                border: none;
-                border-bottom: 1px solid {self.COLORS['BORDER']};
-                font-weight: 600;
-                font-family: 'IBM Plex Sans', sans-serif;
-                font-size: 14px;
-            }}
-            QTableWidget::corner {{
-                background-color: {self.COLORS['SURFACE']};
-                border: none;
-            }}
-            /* Scrollbars */
-            QScrollBar:vertical {{
-                border: none; background: {self.COLORS['SURFACE']};
-                width:8px; margin: 0px;
-                border-radius: 4px;
-            }}
-            QScrollBar::handle:vertical {{
-                background: {self.COLORS['BORDER']};
-                min-height: 40px; border-radius: 4px;
-            }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-                height: 0px;
-            }}
-            QScrollBar:horizontal {{
-                border: none; background: {self.COLORS['SURFACE']};
-                height: 8px; margin: 0px;
-                border-radius: 4px;
-            }}
-            QScrollBar::handle:horizontal {{
-                background: {self.COLORS['BORDER']};
-                min-width: 20px; border-radius: 4px;
-            }}
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
-                width: 0px;
-            }}
-        """)
-        
-        # Anchos de columna
-        self.table.setColumnWidth(0, 40)  # Checkbox
-        self.table.setColumnWidth(1, 100) # Status
-        self.table.setColumnWidth(2, 120) # Meeting ID
-        self.table.setColumnWidth(3, 120) # Time
-        self.table.setColumnWidth(4, 180) # Instructor
-        self.table.setColumnWidth(5, 400) # Program
-        # Reason usa el resto del espacio
-        
-        layout.addWidget(self.table)
-        
-        # Conectar señales de selección
-        self.table.itemSelectionChanged.connect(self.on_selection_changed)
-        self.table.itemChanged.connect(self.on_item_changed)
-        
-        # Buttons
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(12)
-        
-        # Status Summary (Left side)
-        self.lbl_to_update = QLabel("To Update: 0")
-        self.lbl_to_update.setStyleSheet(f"color: {self.COLORS['TEXT_SECONDARY']}; font-weight: 500; font-size: 13px;")
-        btn_layout.addWidget(self.lbl_to_update)
-
-        self.lbl_assigned = QLabel("Assigned: 0")
-        self.lbl_assigned.setStyleSheet(f"color: {self.COLORS['TEXT_SECONDARY']}; font-weight: 500; font-size: 13px;")
-        btn_layout.addWidget(self.lbl_assigned)
-        
-        self.lbl_not_found = QLabel("Not Found: 0")
-        self.lbl_not_found.setStyleSheet(f"color: {self.COLORS['TEXT_SECONDARY']}; font-weight: 500; font-size: 13px;")
-        btn_layout.addWidget(self.lbl_not_found)
-        
-        btn_layout.addStretch()
-        
-        self.cancel_btn = QPushButton("Cancel")
-        self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.cancel_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {self.COLORS['BACKGROUND']};
-                color: {self.COLORS['TEXT_PRIMARY']};
-                border: 1px solid {self.COLORS['BORDER']};
-            }}
-            QPushButton:hover {{
-                background-color: {self.COLORS['SURFACE_SECONDARY']};
-            }}
-        """)
-        self.cancel_btn.clicked.connect(self.reject)
-        
-        self.start_btn = QPushButton("Execute")
-        self.start_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.start_btn.setEnabled(False) # Disabled until processing finishes
-        self.start_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {self.COLORS['PRIMARY']};
-                color: {self.COLORS['PRIMARY_FOREGROUND']};
-                border: 1px solid {self.COLORS['PRIMARY']};
-            }}
-            QPushButton:hover {{
-                background-color: #27272A;
-            }}
-            QPushButton:disabled {{
-                background-color: {self.COLORS['SURFACE_SECONDARY']};
-                color: {self.COLORS['TEXT_SECONDARY']};
-                border: 1px solid {self.COLORS['BORDER']};
-            }}
-        """)
-        self.start_btn.clicked.connect(self.execute_assignment)
-        
-        btn_layout.addWidget(self.cancel_btn)
-        btn_layout.addWidget(self.start_btn)
-        
-        layout.addLayout(btn_layout)
-        
-        # Referencia a los horarios (se pasará desde el padre)
-        self.schedules = []
-
-        # Configurar Hover Delegate
-        self.table.setMouseTracking(True)
-        self.hover_delegate = RowHoverDelegate(self.table)
-        self.table.setItemDelegate(self.hover_delegate)
-        self.table.cellEntered.connect(self.on_cell_entered)
-        self.table.cellClicked.connect(self.on_cell_clicked)
-
-        # Context Menu
-        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self.open_context_menu)
-
-    def on_cell_entered(self, row, column):
-        """Maneja el evento de hover en las celdas."""
-        self.hover_delegate.hover_row = row
-        
-        # Cursor Change for Links (Column 2)
-        item = self.table.item(row, column)
-        if column == 2 and item and item.data(Qt.ItemDataRole.UserRole):
-             self.table.setCursor(Qt.CursorShape.PointingHandCursor)
-        else:
-             self.table.setCursor(Qt.CursorShape.ArrowCursor)
-             
-        self.table.viewport().update()
-
-    def on_cell_clicked(self, row, column):
-        """Maneja el clic en las celdas (para abrir links)."""
-        if column == 2: # Meeting ID
-            item = self.table.item(row, column)
-            if item:
-                url = item.data(Qt.ItemDataRole.UserRole)
-                if url:
-                    QDesktopServices.openUrl(QUrl(url))
-
-    def open_context_menu(self, position):
-        menu = QMenu()
-        menu.setStyleSheet(f"""
-            QMenu {{
-                background-color: {self.COLORS['BACKGROUND']};
-                border: 1px solid {self.COLORS['BORDER']};
-                border-radius: 6px;
-                padding: 4px;
-            }}
-            QMenu::item {{
-                padding: 6px 24px 6px 12px;
-                border-radius: 4px;
-                color: {self.COLORS['TEXT_PRIMARY']};
-                font-family: 'IBM Plex Sans', sans-serif;
-                font-size: 13px;
-            }}
-            QMenu::item:selected {{
-                background-color: {self.COLORS['SURFACE_SECONDARY']};
-            }}
-        """)
-        deselect_action = menu.addAction("Deselect All")
-        action = menu.exec(self.table.viewport().mapToGlobal(position))
-        
-        if action == deselect_action:
-            self.deselect_all_rows()
-
-    def deselect_all_rows(self):
-        self.table.clearSelection()
-        # Ensure checkboxes are updated if necessary (toggle_all_rows handles logic but based on state)
-        # clearSelection triggers selectionChanged which calls on_selection_changed
-        # on_selection_changed updates checkboxes based on selection.
-        # So clearSelection should be enough if on_selection_changed is correct.
-        # Let's verify on_selection_changed logic.
-
-    def toggle_all_rows(self, state: bool):
-        """Marca o desmarca todas las filas."""
-        self.table.blockSignals(True)
-        try:
-            check_state = Qt.CheckState.Checked if state else Qt.CheckState.Unchecked
-            
-            # Actualizar selección visual
-            if state:
-                self.table.selectAll()
-            else:
-                self.table.clearSelection()
-                
-            for i in range(self.table.rowCount()):
-                # Solo si la fila es visible
-                if self.table.isRowHidden(i):
-                    continue
-                    
-                item = self.table.item(i, 0)
-                if item and (item.flags() & Qt.ItemFlag.ItemIsEnabled):
-                    item.setCheckState(check_state)
-        finally:
-            self.table.blockSignals(False)
-            self.update_execute_button_text()
-
-    def on_selection_changed(self):
-        """Sincroniza la selección de filas con los checkboxes."""
-        if self.table.signalsBlocked():
-            return
-
-        self.table.blockSignals(True)
-        try:
-            selected_rows = {index.row() for index in self.table.selectedIndexes()}
-            
-            for i in range(self.table.rowCount()):
-                item = self.table.item(i, 0)
-                if not item or not (item.flags() & Qt.ItemFlag.ItemIsEnabled): continue
-                
-                should_be_checked = i in selected_rows
-                current_state = item.checkState() == Qt.CheckState.Checked
-                
-                if should_be_checked != current_state:
-                    item.setCheckState(Qt.CheckState.Checked if should_be_checked else Qt.CheckState.Unchecked)
-        finally:
-            self.table.blockSignals(False)
-            self.update_execute_button_text()
-
-    def on_item_changed(self, item):
-        """Sincroniza los checkboxes con la selección de filas."""
-        if item.column() == 0:
-            if self.table.signalsBlocked():
-                return
-
-            self.table.blockSignals(True)
-            try:
-                row = item.row()
-                selection_model = self.table.selectionModel()
-                if item.checkState() == Qt.CheckState.Checked:
-                    selection_model.select(self.table.model().index(row, 0), QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
-                else:
-                    selection_model.select(self.table.model().index(row, 0), QItemSelectionModel.SelectionFlag.Deselect | QItemSelectionModel.SelectionFlag.Rows)
-                
-                # Sincronizar header si se desmarca uno
-                if item.checkState() == Qt.CheckState.Unchecked and self.header.isOn:
-                    self.header.isOn = False
-                    self.header.viewport().update()
-            finally:
-                self.table.blockSignals(False)
-                self.update_execute_button_text()
-
-    def process_data(self):
-        """Inicia el procesamiento de datos (búsqueda de coincidencias)."""
-        print(f"DEBUG: process_data called. Schedules count: {len(self.schedules)}")
-        if not self.schedules:
-            # Si no hay horarios, tal vez mostrar un mensaje en la tabla vacía
-            return
-            
-        self.start_btn.setEnabled(False)
-        self.start_btn.setText("Processing...")
-        self.table.setRowCount(0) # Limpiar tabla
-        
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)
-        
-        self.worker = AssignmentWorker(self.schedules)
-        self.worker.progress.connect(self.update_progress)
-        self.worker.finished.connect(self.on_processing_finished)
-        self.worker.start()
-        
-    def update_progress(self, msg):
-        self.setWindowTitle(f"{APP_NAME} | Auto Assign - {msg}")
-
-    def on_processing_finished(self, results, errors):
-        """Maneja los resultados del procesamiento."""
-        self.start_btn.setEnabled(True)
-        self.start_btn.setText("Execute")
-        self.setWindowTitle(f"{APP_NAME} | Auto Assign")
-        self.progress_bar.setVisible(False)
-        
-        if errors:
-            custom_message_box(self, "Error", f"Errors occurred: {'; '.join(errors[:3])}", QMessageBox.Icon.Critical, QMessageBox.StandardButton.Ok)
-            return
-            
-        self.table.setRowCount(len(results))
-        self.table.setSortingEnabled(False)
-        
-        to_update_count = 0
-        assigned_count = 0
-        not_found_count = 0
-        
-        for i, res in enumerate(results):
-            schedule = res["schedule"]
-            status = res["status"]
-            meeting_id = res["meeting_id"]
-            reason = res["reason"]
-            
-            if status == "assigned":
-                assigned_count += 1
-            elif status == "to_update":
-                to_update_count += 1
-            else:
-                not_found_count += 1
-            
-            found_instructor = res.get("found_instructor")
-            
-            # Checkbox
-            chk_item = QTableWidgetItem()
-            
-            if status == "to_update":
-                chk_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-                chk_item.setCheckState(Qt.CheckState.Unchecked)
-                # Guardar datos del instructor para la ejecución
-                if found_instructor:
-                    chk_item.setData(Qt.ItemDataRole.UserRole, found_instructor)
-            else:
-                # Deshabilitar para assigned y not_found
-                chk_item.setFlags(Qt.ItemFlag.NoItemFlags)
-                # No establecemos estado para que no aparezca el checkbox o aparezca deshabilitado
-                # Si queremos que aparezca deshabilitado:
-                chk_item.setFlags(Qt.ItemFlag.ItemIsEnabled) # Solo enabled para visualización, pero no checkable
-                chk_item.setFlags(chk_item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable & ~Qt.ItemFlag.ItemIsSelectable)
-                # Mejor: NoItemFlags para que no se pueda seleccionar la fila via checkbox
-                # Pero queremos ver el texto? No hay texto en col 0.
-                # Para evitar selección de fila, necesitamos manejar flags en TODOS los items de la fila o en selectionChanged.
-                
-                # Estrategia: Items deshabilitados no son seleccionables por defecto en QTableWidget si se configuran bien.
-                chk_item.setFlags(Qt.ItemFlag.NoItemFlags) 
-
-            self.table.setItem(i, 0, chk_item)
-            
-            # Status
-            # Map internal status to display status
-            display_status = "Not Found"
-            color = QColor("#EF4444") # Red
-            
-            if status == "assigned":
-                display_status = "Assigned"
-                color = QColor("#10B981") # Green
-            elif status == "to_update":
-                display_status = "To Update"
-                color = QColor("#F59E0B") # Amber
-            
-            status_item = QTableWidgetItem(display_status)
-            status_item.setForeground(color)
-            status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if status != "to_update":
-                 status_item.setFlags(Qt.ItemFlag.NoItemFlags)
-            self.table.setItem(i, 1, status_item)
-            
-            # Helper para crear items no editables y deshabilitados si no es to_update
-            def create_item(text, align_center=False):
-                it = QTableWidgetItem(str(text))
-                if align_center:
-                    it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if status != "to_update":
-                    it.setFlags(Qt.ItemFlag.NoItemFlags)
-                else:
-                    it.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-                return it
-
-            # Meeting ID
-            meeting_id_item = create_item(str(meeting_id), align_center=True)
-            if meeting_id and str(meeting_id) != "-" and str(meeting_id) != "":
-                 # Configurar como Link
-                 meeting_id_item.setForeground(QColor("#2563EB")) # Blue-600
-                 font = meeting_id_item.font()
-                 font.setUnderline(True)
-                 meeting_id_item.setFont(font)
-                 meeting_id_item.setData(Qt.ItemDataRole.UserRole, f"https://zoom.us/meeting/{meeting_id}")
-                 # Asegurar que sea interactuable para el click
-                 # Si es to_update, debe ser seleccionable para que la fila se vea completa
-                 if status == "to_update":
-                     meeting_id_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-                 else:
-                     meeting_id_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-                 
-            self.table.setItem(i, 2, meeting_id_item)
-            
-            # Time (Local) - Convertir a 24h
-            start_24h = schedule._convert_to_24h(schedule.start_time)
-            end_24h = schedule._convert_to_24h(schedule.end_time)
-            self.table.setItem(i, 3, create_item(f"{start_24h} - {end_24h}", align_center=True))
-            
-            # Instructor
-            self.table.setItem(i, 4, create_item(schedule.instructor))
-            
-            # Program
-            self.table.setItem(i, 5, create_item(schedule.program))
-            
-            # Reason
-            self.table.setItem(i, 6, create_item(reason, align_center=True))
-            
-        self.lbl_to_update.setText(f"To Update: {to_update_count}")
-        self.lbl_assigned.setText(f"Assigned: {assigned_count}")
-        self.lbl_not_found.setText(f"Not Found: {not_found_count}")
-            
-        self.table.setSortingEnabled(True)
-        self.table.sortItems(1, Qt.SortOrder.AscendingOrder)
-        # Re-apply filters
-        self.filter_table()
-        
-        self.update_execute_button_text()
-        # No mostrar popup de completado, solo mostrar la tabla
-        
-    def filter_table(self, text=None):
-        """Filtra la tabla según el estado seleccionado y el texto de búsqueda."""
-        status_filter = self.filter_combo.currentText()
-        search_text = self.search_input.text().lower().strip()
-        
-        # Split search text by comma for multiple instructor search
-        search_terms = [term.strip() for term in search_text.split(',') if term.strip()]
-        
-        for row in range(self.table.rowCount()):
-            # 1. Check Status
-            status_item = self.table.item(row, 1) # Status column
-            if not status_item:
-                continue
-            
-            status = status_item.text()
-            status_match = (status_filter == "All") or (status_filter == status)
-            
-            # 2. Check Search Text (Instructor - Column 4)
-            instructor_item = self.table.item(row, 4)
-            instructor_name = instructor_item.text().lower() if instructor_item else ""
-            
-            if not search_terms:
-                search_match = True
-            else:
-                # Match if ANY of the terms is found in the instructor name
-                search_match = any(term in instructor_name for term in search_terms)
-            
-            if status_match and search_match:
-                self.table.setRowHidden(row, False)
-            else:
-                self.table.setRowHidden(row, True)
-
-    def update_execute_button_text(self):
-        """Actualiza el texto del botón Execute con la cantidad de filas seleccionadas."""
-        count = 0
-        for i in range(self.table.rowCount()):
-            item = self.table.item(i, 0)
-            if item and item.checkState() == Qt.CheckState.Checked:
-                count += 1
-        
-        if count > 0:
-            self.start_btn.setText(f"Execute ({count})")
-        else:
-            self.start_btn.setText("Execute")
-
-    def execute_assignment(self):
-        """Ejecuta la asignación para las filas seleccionadas."""
-        assignments = []
-        
-        for i in range(self.table.rowCount()):
-            item = self.table.item(i, 0)
-            if item and item.checkState() == Qt.CheckState.Checked:
-                found_instructor = item.data(Qt.ItemDataRole.UserRole)
-                meeting_id_item = self.table.item(i, 2)
-                program_item = self.table.item(i, 5)
-                
-                if found_instructor and meeting_id_item:
-                    assignments.append({
-                        "meeting_id": meeting_id_item.text(),
-                        "new_host_email": found_instructor.get("email"),
-                        "new_host_id": found_instructor.get("id"),
-                        "topic": program_item.text() if program_item else "Unknown Meeting"
-                    })
-        
-        if not assignments:
-            custom_message_box(self, "Warning", "No meetings selected for assignment.", QMessageBox.Icon.Warning, QMessageBox.StandardButton.Ok)
-            return
-            
-        confirm = custom_message_box(
-            self, 
-            "Confirm Assignment", 
-            f"Are you sure you want to assign {len(assignments)} meetings?",
-            QMessageBox.Icon.Question,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        
-        if confirm != QMessageBox.StandardButton.Yes:
-            return
-            
-        self.start_btn.setEnabled(False)
-        self.start_btn.setText("Updating...")
-        self.cancel_btn.setEnabled(False)
-        self.table.setEnabled(False)
-        
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)
-        
-        self.update_worker = UpdateWorker(assignments)
-        self.update_worker.progress.connect(self.update_progress)
-        self.update_worker.finished.connect(self.on_update_finished)
-        self.update_worker.start()
-
-    def on_update_finished(self, successes, errors):
-        """Maneja el fin de la actualización."""
-        self.start_btn.setEnabled(True)
-        self.start_btn.setText("Execute")
-        self.cancel_btn.setEnabled(True)
-        self.table.setEnabled(True)
-        self.setWindowTitle(f"{APP_NAME} | Auto Assign")
-        self.progress_bar.setVisible(False)
-        
-        msg = f"Process completed.\n\nSuccess: {len(successes)}\nErrors: {len(errors)}"
-        
-        if errors:
-            msg += "\n\nFirst few errors:\n" + "\n".join(errors[:3])
-            custom_message_box(self, "Completed with Errors", msg, QMessageBox.Icon.Warning, QMessageBox.StandardButton.Ok)
-        else:
-            custom_message_box(self, "Success", msg, QMessageBox.Icon.Information, QMessageBox.StandardButton.Ok)
-            
-        # Recargar datos para reflejar cambios
-        self.process_data()
-
-
-
-class MeetingSearchWorker(QThread):
-    """Worker thread para buscar reuniones en Supabase."""
-    progress = pyqtSignal(str)
-    finished = pyqtSignal(list, list) # meetings, errors
-
-    def run(self):
-        print("DEBUG: MeetingSearchWorker started")
-        meetings = []
-        errors = []
-        
-        try:
-            self.progress.emit("Connecting to Supabase...")
-            if not SUPABASE_URL or not SUPABASE_KEY:
-                raise Exception("Missing SUPABASE_URL or SUPABASE_KEY in .env")
-            
-            supabase: Client = auth_manager.get_client()
-            
-            # 1. Fetch Zoom Users
-            self.progress.emit("Fetching Zoom Users...")
-            users_response = supabase.table("zoom_users").select("id, display_name, first_name, last_name, email").execute()
-            
-            users_map = {} # id -> display_name
-            for u in users_response.data:
-                uid = u["id"]
-                dname = u.get("display_name")
-                if not dname:
-                    fname = u.get("first_name", "").strip()
-                    lname = u.get("last_name", "").strip()
-                    dname = f"{fname} {lname}".strip()
-                users_map[uid] = dname
-            
-            # 2. Fetch Zoom Meetings
-            self.progress.emit("Fetching Zoom Meetings...")
-            # Fetch all meetings (pagination might be needed if huge, but let's start simple or use same pagination logic)
-            all_meetings = []
-            page_size = 1000
-            offset = 0
-            
-            while True:
-                response = supabase.table("zoom_meetings")\
-                    .select("meeting_id, topic, host_id, created_at")\
-                    .range(offset, offset + page_size - 1)\
-                    .execute()
-                if not response.data:
-                    break
-                all_meetings.extend(response.data)
-                if len(response.data) < page_size:
-                    break
-                offset += page_size
-                self.progress.emit(f"Fetching Zoom Meetings... ({len(all_meetings)} loaded)")
-                
-            # 3. Process Meetings
-            self.progress.emit("Processing data...")
-            for m in all_meetings:
-                host_id = m.get("host_id")
-                m["host_name"] = users_map.get(host_id, "Unknown")
-                meetings.append(m)
-                
-        except Exception as e:
-            errors.append(str(e))
-            
-        self.finished.emit(meetings, errors)
-
-
-class MeetingSearchDialog(QDialog):
-    """Diálogo para buscar y filtrar reuniones."""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(f"{APP_NAME} | Search Meetings")
-        self.setModal(True)
-        self.setFixedSize(1000, 600)
-        
-        # Colores (Reutilizar del padre si es posible, o definir aquí)
-        self.COLORS = {
-            "BACKGROUND": "#FFFFFF",
-            "SURFACE": "#FFFFFF",
-            "SURFACE_SECONDARY": "#F4F4F5",
-            "BORDER": "#E4E4E7",
-            "TEXT_PRIMARY": "#09090B",
-            "TEXT_SECONDARY": "#71717A",
-            "PRIMARY": "#18181B",
-            "PRIMARY_FOREGROUND": "#FAFAFA",
-            "DESTRUCTIVE": "#EF4444",
-            "ACCENT": "#F4F4F5",
-        }
-
-        self.setStyleSheet(f"""
-            QDialog {{ background-color: {self.COLORS['BACKGROUND']}; }}
-            QLabel {{ font-family: 'IBM Plex Sans', sans-serif; font-size: 14px; color: {self.COLORS['TEXT_PRIMARY']}; }}
-            QPushButton {{
-                font-family: 'IBM Plex Sans', sans-serif; border-radius: 6px; padding: 8px 16px; font-weight: 500; font-size: 14px;
-            }}
-        """)
-        
-        layout = QVBoxLayout(self)
-        layout.setSpacing(20)
-        layout.setContentsMargins(24, 24, 24, 24)
-        
-        # Header
-        header_layout = QVBoxLayout()
-        header_layout.setSpacing(4)
-        title = QLabel("Search Meetings")
-        title.setStyleSheet("font-size: 18px; font-weight: bold;")
-        desc = QLabel("Find Zoom meetings by program or instructor.")
-        desc.setStyleSheet(f"color: {self.COLORS['TEXT_SECONDARY']};")
-        header_layout.addWidget(title)
-        header_layout.addWidget(desc)
-        layout.addLayout(header_layout)
-        
-        # Filters
-        filter_layout = QHBoxLayout()
-        filter_layout.setSpacing(12)
-        
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Search by Program/Topic...")
-        self.search_input.setMinimumWidth(250)
-        self.search_input.setStyleSheet(f"""
-            QLineEdit {{
-                font-family: 'IBM Plex Sans', sans-serif; border: 1px solid {self.COLORS['BORDER']}; border-radius: 6px; padding: 8px 12px; background-color: {self.COLORS['SURFACE']}; color: {self.COLORS['TEXT_PRIMARY']}; font-size: 14px;
-            }}
-            QLineEdit:focus {{ border: 1px solid #18181B; }}
-        """)
-        self.search_input.textChanged.connect(self.filter_table)
-        
-        self.instructor_input = QLineEdit()
-        self.instructor_input.setPlaceholderText("Filter by Instructor...")
-        self.instructor_input.setMinimumWidth(200)
-        self.instructor_input.setStyleSheet(f"""
-            QLineEdit {{
-                font-family: 'IBM Plex Sans', sans-serif; border: 1px solid {self.COLORS['BORDER']}; border-radius: 6px; padding: 8px 12px; background-color: {self.COLORS['SURFACE']}; color: {self.COLORS['TEXT_PRIMARY']}; font-size: 14px;
-            }}
-            QLineEdit:focus {{ border: 1px solid #18181B; }}
-        """)
-        self.instructor_input.textChanged.connect(self.filter_table)
-        
-        self.refresh_btn = QPushButton("Refresh")
-        self.refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.refresh_btn.setStyleSheet(f"""
-            QPushButton {{ background-color: {self.COLORS['SURFACE']}; color: {self.COLORS['TEXT_PRIMARY']}; border: 1px solid {self.COLORS['BORDER']}; }}
-            QPushButton:hover {{ background-color: {self.COLORS['SURFACE_SECONDARY']}; }}
-        """)
-        self.refresh_btn.clicked.connect(self.load_data)
-        
-        filter_layout.addWidget(self.search_input)
-        filter_layout.addWidget(self.instructor_input)
-        filter_layout.addWidget(self.refresh_btn)
-        filter_layout.addStretch()
-        layout.addLayout(filter_layout)
-        
-        # Progress Bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        self.progress_bar.setTextVisible(False)
-        self.progress_bar.setFixedHeight(4)
-        self.progress_bar.setStyleSheet(f"""
-            QProgressBar {{ border: none; background-color: {self.COLORS['SURFACE_SECONDARY']}; border-radius: 2px; }}
-            QProgressBar::chunk {{ background-color: {self.COLORS['PRIMARY']}; border-radius: 2px; }}
-        """)
-        layout.addWidget(self.progress_bar)
-        
-        # Table
-        self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["Meeting ID", "Topic", "Host", "Created At"])
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setShowGrid(False)
-        self.table.setFrameShape(QFrame.Shape.NoFrame)
-        self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(44) # Better row height
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        
-        # Estilos Tabla
-        self.table.setStyleSheet(f"""
-            QTableWidget {{ background-color: {self.COLORS['SURFACE']}; border: 1px solid {self.COLORS['BORDER']}; border-radius: 8px; outline: none; }}
-            QTableWidget::item {{ padding: 8px; border-bottom: 1px solid {self.COLORS['BORDER']}; color: {self.COLORS['TEXT_PRIMARY']}; }}
-            QTableWidget::item:selected {{ background-color: {self.COLORS['SURFACE_SECONDARY']}; color: {self.COLORS['TEXT_PRIMARY']}; }}
-            QHeaderView::section {{ background-color: {self.COLORS['SURFACE_SECONDARY']}; color: {self.COLORS['TEXT_SECONDARY']}; padding: 12px; border: none; border-bottom: 1px solid {self.COLORS['BORDER']}; font-weight: 600; }}
-            QScrollBar:vertical {{ background-color: {self.COLORS['SURFACE']}; border: none; width: 8px; border-radius: 4px; }}
-            QScrollBar::handle:vertical {{ background: {self.COLORS['BORDER']};border-radius: 4px; min-height: 40px; }}
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
-        """)
-        
-        # Column Widths
-        self.table.setColumnWidth(0, 150) # ID
-        self.table.setColumnWidth(1, 360) # Topic
-        self.table.setColumnWidth(2, 200) # Host
-        self.table.setColumnWidth(3, 150) # Created At
-        
-        # Hover Delegate
-        self.table.setMouseTracking(True)
-        self.hover_delegate = RowHoverDelegate(self.table)
-        self.table.setItemDelegate(self.hover_delegate)
-        self.table.cellEntered.connect(self.on_cell_entered)
-        self.table.cellClicked.connect(self.on_cell_clicked)
-        
-        layout.addWidget(self.table)
-        
-        # Close Button
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        self.close_btn = QPushButton("Close")
-        self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.close_btn.setStyleSheet(f"""
-            QPushButton {{ background-color: {self.COLORS['PRIMARY']}; color: {self.COLORS['PRIMARY_FOREGROUND']}; border: 1px solid {self.COLORS['PRIMARY']}; }}
-            QPushButton:hover {{ background-color: #27272A; }}
-        """)
-        self.close_btn.clicked.connect(self.accept)
-        btn_layout.addWidget(self.close_btn)
-        layout.addLayout(btn_layout)
-        
-        # Data
-        self.all_meetings = []
-        
-        # Load Data on Open
-        QTimer.singleShot(100, self.load_data)
-
-    def on_cell_entered(self, row, column):
-        self.hover_delegate.hover_row = row
-        # Cursor hand for Meeting ID (0)
-        if column == 0:
-             self.table.setCursor(Qt.CursorShape.PointingHandCursor)
-        else:
-             self.table.setCursor(Qt.CursorShape.ArrowCursor)
-        self.table.viewport().update()
-
-    def on_cell_clicked(self, row, column):
-        if column == 0: # Meeting ID link
-            item = self.table.item(row, column)
-            if item:
-                mid = item.text()
-                url = f"https://zoom.us/meeting/{mid}"
-                QDesktopServices.openUrl(QUrl(url))
-
-    def load_data(self):
-        self.table.setRowCount(0)
-        self.refresh_btn.setEnabled(False)
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)
-        
-        self.worker = MeetingSearchWorker()
-        self.worker.progress.connect(self.update_progress)
-        self.worker.finished.connect(self.on_data_loaded)
-        self.worker.start()
-        
-    def update_progress(self, msg):
-        self.setWindowTitle(f"{APP_NAME} | Search Meetings - {msg}")
-
-    def on_data_loaded(self, meetings, errors):
-        self.refresh_btn.setEnabled(True)
-        self.progress_bar.setVisible(False)
-        self.setWindowTitle(f"{APP_NAME} | Search Meetings")
-        
-        if errors:
-            custom_message_box(self, "Error", f"Error loading data: {errors[0]}", QMessageBox.Icon.Critical, QMessageBox.StandardButton.Ok)
-            return
-            
-        self.all_meetings = meetings
-        
-        # No need to populate combo anymore
-        
-        self.populate_table(meetings)
-
-    def populate_table(self, meetings):
-        self.table.setRowCount(len(meetings))
-        self.table.setSortingEnabled(False)
-        
-        for i, m in enumerate(meetings):
-            # ID
-            id_item = QTableWidgetItem(str(m.get("meeting_id")))
-            id_item.setForeground(QColor("#2563EB"))
-            id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            font = id_item.font()
-            font.setUnderline(True)
-            id_item.setFont(font)
-            self.table.setItem(i, 0, id_item)
-            
-            # Topic
-            self.table.setItem(i, 1, QTableWidgetItem(str(m.get("topic", ""))))
-            
-            # Host
-            host_item = QTableWidgetItem(str(m.get("host_name", "")))
-            host_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(i, 2, host_item)
-            
-            # Created At
-            created_at = m.get("created_at", "")
-            # Formatear si es posible (ISO string a algo legible)
-            try:
-                dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-                created_at = dt.strftime("%Y-%m-%d %H:%M")
-            except:
-                pass
-            created_at_item = QTableWidgetItem(created_at)
-            created_at_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(i, 3, created_at_item)
-            
-        self.table.setSortingEnabled(True)
-
-    def filter_table(self):
-        search_text = self.search_input.text().lower().strip()
-        instructor_filter = self.instructor_input.text().lower().strip()
-        
-        filtered = []
-        for m in self.all_meetings:
-            # 1. Instructor
-            host_name = str(m.get("host_name", "")).lower()
-            if instructor_filter and instructor_filter not in host_name:
-                continue
-                
-            # 2. Search Text (Topic or ID)
-            topic = str(m.get("topic", "")).lower()
-            mid = str(m.get("meeting_id", ""))
-            
-            if search_text and (search_text not in topic and search_text not in mid):
-                continue
-                
-            filtered.append(m)
-            
-        self.populate_table(filtered)
 
 
 # ============================================================================
@@ -2251,6 +692,12 @@ class SchedulePlanner(QMainWindow):
         self.search_meetings_btn.setStyleSheet(self.get_button_style("secondary"))
         self.search_meetings_btn.clicked.connect(self.open_meeting_search_dialog)
         
+        self.create_links_btn = QPushButton("Create Links")
+        self.create_links_btn.setMinimumHeight(36)
+        self.create_links_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.create_links_btn.setStyleSheet(self.get_button_style("secondary"))
+        self.create_links_btn.clicked.connect(self.open_link_creation_dialog)
+        
         self.filter_instructor_input = QLineEdit()
         self.filter_instructor_input.setPlaceholderText("Filter by Instructor...")
         self.filter_instructor_input.setMinimumWidth(180)
@@ -2285,6 +732,7 @@ class SchedulePlanner(QMainWindow):
 
         action_layout.addWidget(self.load_btn)
         action_layout.addWidget(self.search_meetings_btn)
+        action_layout.addWidget(self.create_links_btn)
         action_layout.addWidget(self.filter_instructor_input)
         action_layout.addWidget(self.filter_program_input)
         action_layout.addWidget(self.filter_time_combo)
@@ -2299,6 +747,13 @@ class SchedulePlanner(QMainWindow):
         action_layout.addWidget(self.clear_filters_btn)
         
         action_layout.addStretch()
+
+        self.logout_btn = QPushButton("Logout")
+        self.logout_btn.setMinimumHeight(36)
+        self.logout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.logout_btn.setStyleSheet(self.get_button_style("destructive"))
+        self.logout_btn.clicked.connect(self.logout)
+        action_layout.addWidget(self.logout_btn)
 
 
         
@@ -2821,7 +1276,7 @@ class SchedulePlanner(QMainWindow):
                         new_filtered.append(s)
                 filtered_schedules = new_filtered
             except Exception as e:
-                print(f"Error filtering time: {e}")
+                logger.warning(f"Error filtering time: {e}")
             
         # Filtrar por cruces si está activado
         if self.show_overlaps_cb.isChecked():
@@ -3475,7 +1930,7 @@ class SchedulePlanner(QMainWindow):
     def open_auto_assign_modal(self):
         """Abre el modal de asignación automática."""
         # Verificar permiso
-        if not auth_manager.has_permission(permissions.ASSIGNMENT_AUTO):
+        if not auth_manager.has_permission(permissions.AUTO_ASSIGN):
             custom_message_box(
                 self, 
                 "Access Denied", 
@@ -3513,23 +1968,36 @@ class SchedulePlanner(QMainWindow):
         dialog = MeetingSearchDialog(self)
         dialog.exec()
 
+    def open_link_creation_dialog(self):
+        """Abre el diálogo de creación de links."""
+        # Verificar permiso
+        if not auth_manager.has_permission(permissions.CREATE_LINKS):
+            custom_message_box(
+                self, 
+                "Access Denied", 
+                "You do not have permission to create links.", 
+                QMessageBox.Icon.Warning, 
+                QMessageBox.StandardButton.Ok
+            )
+            return
+        
+        dialog = LinkCreationDialog(self)
+        dialog.exec()
+
     def apply_permissions(self):
         """Aplica restricciones de UI basadas en permisos."""
 
-            
         # Auto Assign
-        # Nota: auto_assign_btn también depende de si hay datos cargados.
-        # Manejamos la visibilidad/habilitación base aquí, pero la lógica de datos puede sobreescribirlo.
-        # Mejor estrategia: Si no tiene permiso, lo ocultamos o deshabilitamos permanentemente.
-        if not auth_manager.has_permission(permissions.ASSIGNMENT_AUTO):
-            self.auto_assign_btn.setVisible(False) # Ocultar si no tiene permiso
-            # O deshabilitar y poner tooltip:
-            # self.auto_assign_btn.setEnabled(False)
-            # self.auto_assign_btn.setToolTip("Permission required")
+        if not auth_manager.has_permission(permissions.AUTO_ASSIGN):
+            self.auto_assign_btn.setVisible(False)
             
         # Search Meetings
         if not auth_manager.has_permission(permissions.MEETING_SEARCH):
             self.search_meetings_btn.setVisible(False)
+
+        # Create Links
+        if not auth_manager.has_permission(permissions.CREATE_LINKS):
+            self.create_links_btn.setVisible(False)
 
         
 
@@ -3559,8 +2027,8 @@ class SchedulePlanner(QMainWindow):
                 hours = 0
                 
             return hours * 60 + minutes
-        except:
-            return -1
+        except (ValueError, AttributeError):
+            return -1  # Tiempo inválido
 
     def find_conflicts(self, schedules: List[Schedule]) -> List[Schedule]:
         """Encuentra horarios con conflictos (mismo instructor o grupo a la misma hora)."""
@@ -3625,14 +2093,32 @@ class SchedulePlanner(QMainWindow):
     
     def check_updates(self):
         """Inicia la verificación de actualizaciones."""
-        print("Checking for updates...")
+        logger.info("Checking for updates...")
         version_manager.update_available.connect(self.on_update_available)
-        version_manager.no_update.connect(lambda: print("No updates available."))
+        version_manager.no_update.connect(lambda: logger.info("No updates available."))
         version_manager.error.connect(self.on_update_error)
         version_manager.download_progress.connect(self.on_download_progress)
         version_manager.download_complete.connect(self.on_download_complete)
         
         version_manager.check_for_updates()
+
+    def logout(self):
+        """Cierra sesión y sale de la aplicación."""
+        reply = custom_message_box(
+            self,
+            "Confirm Logout",
+            "Are you sure you want to logout?",
+            QMessageBox.Icon.Question,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            session_manager.clear_session()
+            # No need to show message box if we are exiting, but it's nice feedback
+            # However, sys.exit(0) might kill it too fast.
+            # Let's just exit.
+            logger.info("User logged out")
+            sys.exit(0)
 
     def on_update_available(self, version, url, notes):
         """Muestra diálogo de actualización OBLIGATORIA."""
@@ -3696,17 +2182,17 @@ def main():
     user_info = None
     config = None
     
-    print("Checking for saved session...")
+    logger.info("Checking for saved session...")
     session_data = session_manager.load_session()
     
     if session_data:
         # Sesión restaurada exitosamente
         supabase_client, user_info, config = session_data
         auth_manager.set_client(supabase_client) # Registrar cliente autenticado
-        print(f"✓ Auto-login successful for {user_info.get('email', 'user')}")
+        logger.info(f"✓ Auto-login successful for {user_info.get('email', 'user')}")
     else:
         # No hay sesión guardada o expiró, mostrar login
-        print("No saved session found, showing login dialog...")
+        logger.info("No saved session found, showing login dialog...")
         login_dialog = LoginDialog()
         if login_dialog.exec() != QDialog.DialogCode.Accepted:
             # Usuario canceló o falló el login
@@ -3739,7 +2225,7 @@ def main():
     # Limpiar credenciales al cerrar
     def cleanup():
         config_manager.clear_cache()
-        print("Session cleaned up")
+        logger.info("Session cleaned up")
     
     app.aboutToQuit.connect(cleanup)
     
