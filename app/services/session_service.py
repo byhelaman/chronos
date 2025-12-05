@@ -90,6 +90,7 @@ class SessionService:
             
             # Restore session
             try:
+                # First try set_session which should auto-refresh if needed
                 supabase.auth.set_session(
                     access_token=session_data["access_token"],
                     refresh_token=session_data["refresh_token"]
@@ -98,9 +99,7 @@ class SessionService:
                 # Verify session is still valid
                 current_session = supabase.auth.get_session()
                 if not current_session:
-                    print("Session invalid, please login again")
-                    self.clear_session()
-                    return None
+                    raise Exception("Session not restored")
                 
                 # Check if tokens rotated and save if needed
                 if (current_session.access_token != session_data["access_token"] or 
@@ -109,9 +108,27 @@ class SessionService:
                     self.save_session(supabase, session_data["user_info"])
                 
             except Exception as e:
-                print(f"Could not restore session: {e}")
-                self.clear_session()
-                return None
+                # set_session failed, try explicit refresh
+                error_str = str(e).lower()
+                if "expired" in error_str or "invalid" in error_str:
+                    print(f"JWT expired, attempting refresh...")
+                    try:
+                        # Try to refresh using the refresh token
+                        refresh_response = supabase.auth.refresh_session(session_data["refresh_token"])
+                        if refresh_response and refresh_response.session:
+                            print("✓ Session refreshed successfully")
+                            # Save the new tokens
+                            self.save_session(supabase, session_data["user_info"])
+                        else:
+                            raise Exception("Refresh failed")
+                    except Exception as refresh_error:
+                        print(f"Could not refresh session: {refresh_error}")
+                        self.clear_session()
+                        return None
+                else:
+                    print(f"Could not restore session: {e}")
+                    self.clear_session()
+                    return None
             
             # Refresh user info from database to ensure permissions are up to date
             try:

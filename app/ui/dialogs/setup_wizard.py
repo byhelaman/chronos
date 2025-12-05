@@ -4,11 +4,13 @@ Complete setup wizard: Supabase → Admin → Zoom OAuth
 Uses default Qt styling.
 """
 
+import os
 from PyQt6.QtWidgets import (
     QWizard, QWizardPage, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QMessageBox
 )
 from PyQt6.QtCore import QThread, pyqtSignal, QTimer
+from PyQt6.QtGui import QIcon
 
 from supabase import create_client
 import webbrowser
@@ -439,6 +441,12 @@ class SetupWizard(QWizard):
         super().__init__(parent)
         
         self.setWindowTitle("Chronos Setup")
+        
+        # Set window icon
+        icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "favicon.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+        
         self.setWizardStyle(QWizard.WizardStyle.ModernStyle)
         
         self.addPage(WelcomePage())

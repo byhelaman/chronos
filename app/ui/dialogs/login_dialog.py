@@ -3,12 +3,13 @@ Chronos v2 - Login Dialog
 Uses new auth_service and session_service (no encryption, no hardcoded secrets)
 """
 
+import os
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QLineEdit, 
     QPushButton, QCheckBox, QWidget
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QIcon
 
 from supabase import Client
 from typing import Optional, Dict
@@ -47,6 +48,11 @@ class LoginDialog(QDialog):
         self.setWindowTitle("Chronos - Login")
         self.setFixedSize(400, 500)
         self.setModal(True)
+        
+        # Set window icon
+        icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "favicon.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
         
         self._setup_ui()
         self._apply_styles()

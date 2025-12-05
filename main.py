@@ -96,6 +96,26 @@ def main():
             sys.exit(1)
     
     # =====================================================
+    # STEP 1.5: Check for mandatory updates
+    # =====================================================
+    print("Checking for updates...")
+    update_info = version_manager.check_for_update_sync()
+    
+    if update_info:
+        print(f"Update available: v{update_info['version']}")
+        from app.ui.dialogs.update_dialog import UpdateDialog
+        
+        dialog = UpdateDialog(update_info)
+        result = dialog.exec()
+        
+        # If dialog rejected (Exit clicked), close app
+        if result == QDialog.DialogCode.Rejected:
+            print("Update declined by user")
+            sys.exit(0)
+    else:
+        print("No updates available.")
+    
+    # =====================================================
     # STEP 2: Try to restore session or show login
     # =====================================================
     if not try_restore_session():

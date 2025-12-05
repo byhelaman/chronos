@@ -50,6 +50,44 @@ class VersionManager(QObject):
         # Mantener referencia para evitar garbage collection
         self._check_thread = thread
 
+    def check_for_update_sync(self) -> Optional[Dict]:
+        """
+        Synchronous update check for blocking startup.
+        Returns dict with {version, url, notes} if update available, None otherwise.
+        """
+        try:
+            with httpx.Client() as client:
+                response = client.get(self.GITHUB_API_URL, timeout=10)
+                response.raise_for_status()
+                
+                data = response.json()
+                tag_name = data.get("tag_name", "").lstrip("v")
+                body = data.get("body", "")
+                assets = data.get("assets", [])
+                
+                if not tag_name or not assets:
+                    return None
+                
+                # Find .exe asset
+                download_url = None
+                for asset in assets:
+                    if asset["name"].endswith(".exe"):
+                        download_url = asset["browser_download_url"]
+                        break
+                
+                if not download_url:
+                    return None
+                
+                # Compare versions
+                if parse_version(tag_name) > parse_version(CURRENT_VERSION):
+                    return {"version": tag_name, "url": download_url, "notes": body}
+                
+                return None
+                
+        except Exception as e:
+            print(f"Update check failed: {e}")
+            return None  # Allow app to continue if check fails
+
     def download_update(self, url: str):
         """Descarga la actualización"""
         self._download_thread = DownloadThread(url)

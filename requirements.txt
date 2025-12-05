@@ -5,3 +5,4 @@ cryptography
 PyQt6
 rapidfuzz
 pyinstaller
+keyring

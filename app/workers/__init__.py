@@ -228,9 +228,10 @@ class UpdateWorker(QThread):
     progress = pyqtSignal(str)
     finished = pyqtSignal(list, list)  # success_list, error_list
 
-    def __init__(self, assignments: List[dict]):
+    def __init__(self, assignments: List[dict], update_recurrence: bool = False):
         super().__init__()
         self.assignments = assignments
+        self.update_recurrence = update_recurrence
 
     def run(self):
         logger.debug("UpdateWorker started")
@@ -241,16 +242,45 @@ class UpdateWorker(QThread):
             self.progress.emit("Connecting to Supabase...")
             supabase = auth_service.get_client()
             
-            # 1. Get Zoom Token
+            # 1. Get Zoom Token (and refresh if needed)
             self.progress.emit("Fetching Zoom Token...")
-            token_resp = supabase.table("zoom_tokens").select("access_token").limit(1).execute()
+            token_resp = supabase.table("zoom_tokens").select("access_token, expires_at").limit(1).execute()
             if not token_resp.data:
                 raise Exception("No Zoom token found in database. Please sync first.")
             
-            current_token = token_resp.data[0]["access_token"]
+            token_data = token_resp.data[0]
+            current_token = token_data["access_token"]
+            
+            # Check if token is expired and refresh
+            from datetime import datetime
+            expires_at = token_data.get("expires_at")
+            if expires_at:
+                try:
+                    expires_dt = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                    if datetime.now(expires_dt.tzinfo) >= expires_dt:
+                        self.progress.emit("Refreshing Zoom Token...")
+                        current_token = zoom_service.refresh_token(supabase)
+                except Exception as refresh_err:
+                    logger.warning(f"Could not check/refresh token: {refresh_err}")
+            
+            # Recurrence settings (if updating recurrence)
+            recurrence_settings = None
+            start_time_str = None
+            if self.update_recurrence:
+                from datetime import datetime, timedelta
+                # Base settings - will override start_time per item
+                end_date = datetime.now() + timedelta(days=120)
+                end_date_str = end_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+                recurrence_settings = {
+                    "type": 2,  # Weekly
+                    "repeat_interval": 1,
+                    "weekly_days": "2,3,4,5,6",  # Mon-Fri
+                    "end_date_time": end_date_str
+                }
             
             # 2. Process assignments
             total = len(self.assignments)
+            update_recurrence = self.update_recurrence
             
             def process_assignment(item, token):
                 """Process single assignment."""
@@ -258,9 +288,33 @@ class UpdateWorker(QThread):
                 new_host_email = item["new_host_email"]
                 new_host_id = item["new_host_id"]
                 topic = item.get("topic", "")
+                row_start_time = item.get("start_time", "09:00")  # Default 9:00 AM
                 
                 try:
+                    # Update host
                     zoom_service.update_meeting_host(token, meeting_id, new_host_email)
+                    
+                    # Update recurrence if enabled
+                    if update_recurrence and recurrence_settings:
+                        from datetime import datetime, timedelta
+                        # Parse row start_time (HH:MM format)
+                        try:
+                            hour, minute = map(int, row_start_time.split(":"))
+                        except:
+                            hour, minute = 9, 0
+                        
+                        start_date = datetime.now() + timedelta(days=1)
+                        start_date = start_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                        item_start_time_str = start_date.strftime("%Y-%m-%dT%H:%M:%S")
+                        
+                        zoom_service.update_meeting(
+                            access_token=token,
+                            meeting_id=meeting_id,
+                            topic=topic,
+                            start_time=item_start_time_str,
+                            duration=60,
+                            recurrence=recurrence_settings
+                        )
                     
                     # Update DB
                     supabase.table("zoom_meetings").update({
@@ -316,7 +370,7 @@ class MeetingSearchWorker(QThread):
             
             while True:
                 response = supabase.table("zoom_meetings")\
-                    .select("meeting_id, topic, host_id")\
+                    .select("meeting_id, topic, host_id, created_at")\
                     .range(offset, offset + page_size - 1)\
                     .execute()
                     

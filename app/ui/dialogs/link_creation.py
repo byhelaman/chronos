@@ -417,18 +417,39 @@ class LinkCreationDialog(QDialog):
         
         self.worker = LinkCreationWorker(programs, mode="verify")
         self.worker.progress.connect(self.update_progress)
-        self.worker.finished.connect(lambda r, e: self.on_finished(r, e, "verify"))
+        self.worker.finished.connect(self.on_finished)
         self.worker.start()
 
     def create_links(self):
-        """Inicia el proceso de creación para los items marcados como 'ready'."""
-        # Filter programs that are ready
-        programs_to_create = [
-            res["program"] for res in self.all_results 
-            if res["status"] == "ready"
-        ]
+        """Inicia el proceso de creación/actualización para los items marcados."""
+        # Get current table data with status
+        items_to_process = []
+        for i in range(self.table.rowCount()):
+            status_item = self.table.item(i, 0)
+            program_item = self.table.item(i, 1)
+            meeting_id_item = self.table.item(i, 2)
+            link_item = self.table.item(i, 3)
+            
+            if status_item and program_item:
+                status_text = status_item.text().lower().replace(" ", "_")
+                # Convert UI status to internal status
+                if status_text == "to_create":
+                    status_text = "ready"
+                elif status_text == "to_update":
+                    status_text = "to_update"
+                else:
+                    status_text = status_item.text().lower()
+                
+                items_to_process.append({
+                    "program": program_item.text(),
+                    "status": status_text,
+                    "meeting_id": meeting_id_item.text() if meeting_id_item else "-",
+                    "join_url": link_item.data(Qt.ItemDataRole.UserRole) if link_item else ""
+                })
         
-        if not programs_to_create:
+        # Check if there's anything to process
+        actionable = [i for i in items_to_process if i["status"] in ["ready", "to_update"]]
+        if not actionable:
             return
 
         self.verify_btn.setEnabled(False)
@@ -437,9 +458,9 @@ class LinkCreationDialog(QDialog):
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
         
-        self.worker = LinkCreationWorker(programs_to_create, mode="create")
+        self.worker = LinkCreationWorker(items_to_process, mode="create")
         self.worker.progress.connect(self.update_progress)
-        self.worker.finished.connect(lambda r, e: self.on_finished(r, e, "create"))
+        self.worker.finished.connect(self.on_finished)
         self.worker.start()
 
     def update_progress(self, msg):
@@ -455,29 +476,29 @@ class LinkCreationDialog(QDialog):
             self.all_results = results
             self.populate_table(self.all_results)
             
-            # Check if any ready to create
+            # Check if any ready to create or update
             ready_count = sum(1 for r in results if r["status"] == "ready")
-            if ready_count > 0:
+            existing_count = sum(1 for r in results if r["status"] == "existing")
+            
+            if ready_count > 0 or existing_count > 0:
                 self.create_btn.setEnabled(True)
-                self.create_btn.setText(f"Create {ready_count} Links")
+                btn_text = []
+                if ready_count > 0:
+                    btn_text.append(f"Create ({ready_count})")
+                self.create_btn.setText(" / ".join(btn_text) if btn_text else "Process")
             else:
                 self.create_btn.setEnabled(False)
                 self.create_btn.setText("Create Links")
                 
         elif mode == "create":
             # Update all_results with new results
-            # Create a map of new results by program for easy update
-            new_results_map = {r["program"]: r for r in results}
-            
-            updated_count = 0
-            for i, res in enumerate(self.all_results):
-                if res["program"] in new_results_map:
-                    self.all_results[i] = new_results_map[res["program"]]
-                    updated_count += 1
-            
+            self.all_results = results
             self.populate_table(self.all_results)
             self.create_btn.setEnabled(False)
             self.create_btn.setText("Create Links")
+            
+            created_count = sum(1 for r in results if r["status"] == "created")
+            updated_count = sum(1 for r in results if r["status"] == "updated")
             
             if errors:
                 custom_message_box(
@@ -486,9 +507,14 @@ class LinkCreationDialog(QDialog):
                     QMessageBox.Icon.Warning, QMessageBox.StandardButton.Ok
                 )
             else:
+                msg_parts = []
+                if created_count > 0:
+                    msg_parts.append(f"Created {created_count} links")
+                if updated_count > 0:
+                    msg_parts.append(f"Updated {updated_count} meetings")
                 custom_message_box(
                     self, "Success", 
-                    f"Successfully created {updated_count} links.",
+                    ".\n".join(msg_parts) + ".",
                     QMessageBox.Icon.Information, QMessageBox.StandardButton.Ok
                 )
 
@@ -499,12 +525,24 @@ class LinkCreationDialog(QDialog):
         for i, res in enumerate(results):
             # Status (Column 0)
             status = res["status"]
-            status_item = QTableWidgetItem(status.title())
-            if status == "ready":
-                status_item.setText("To Create")
+            status_item = QTableWidgetItem()
             
+            # Map status to display text and color
+            status_config = {
+                "ready": ("To Create", "#16a34a"),      # Green
+                "existing": ("Existing", "#71717a"),    # Gray
+                "to_update": ("To Update", "#2563eb"),  # Blue
+                "created": ("Created", "#16a34a"),      # Green
+                "updated": ("Updated", "#2563eb"),      # Blue
+                "error": ("Error", "#dc2626"),          # Red
+            }
+            
+            display_text, color = status_config.get(status, (status.title(), "#71717a"))
+            status_item.setText(display_text)
+            status_item.setForeground(QColor(color))
             status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            status_item.setFlags(status_item.flags() | Qt.ItemFlag.ItemIsEditable)
+            # Store original status for processing
+            status_item.setData(Qt.ItemDataRole.UserRole, status)
             self.table.setItem(i, 0, status_item)
 
             # Program (Column 1)
@@ -512,9 +550,17 @@ class LinkCreationDialog(QDialog):
             prog_item.setFlags(prog_item.flags() | Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(i, 1, prog_item)
             
-            # Meeting ID (Column 2)
-            id_item = QTableWidgetItem(res["meeting_id"])
-            id_item.setFlags(id_item.flags() | Qt.ItemFlag.ItemIsEditable)
+            # Meeting ID (Column 2) - Clickable link
+            meeting_id = res["meeting_id"]
+            id_item = QTableWidgetItem(meeting_id)
+            id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if meeting_id and meeting_id != "-":
+                id_item.setForeground(QColor("#2563EB"))
+                font = id_item.font()
+                font.setUnderline(True)
+                id_item.setFont(font)
+                # Store zoom meeting URL for click handling
+                id_item.setData(Qt.ItemDataRole.UserRole, f"https://zoom.us/meeting/{meeting_id}")
             self.table.setItem(i, 2, id_item)
             
             # Link (Column 3)
@@ -526,15 +572,56 @@ class LinkCreationDialog(QDialog):
                 font.setUnderline(True)
                 link_item.setFont(font)
                 link_item.setData(Qt.ItemDataRole.UserRole, link)
-                self.table.setCursor(Qt.CursorShape.PointingHandCursor)
             
-            link_item.setFlags(link_item.flags() | Qt.ItemFlag.ItemIsEditable)
             self.table.setItem(i, 3, link_item)
             
         self.table.setSortingEnabled(True)
+        self._update_create_button()
+    
+    def _update_create_button(self):
+        """Update create button text based on current table state."""
+        ready_count = 0
+        update_count = 0
+        
+        for i in range(self.table.rowCount()):
+            status_item = self.table.item(i, 0)
+            if status_item:
+                status = status_item.data(Qt.ItemDataRole.UserRole)
+                if status == "ready":
+                    ready_count += 1
+                elif status == "to_update":
+                    update_count += 1
+        
+        if ready_count > 0 or update_count > 0:
+            self.create_btn.setEnabled(True)
+            parts = []
+            if ready_count > 0:
+                parts.append(f"Create ({ready_count})")
+            if update_count > 0:
+                parts.append(f"Update ({update_count})")
+            self.create_btn.setText(" / ".join(parts))
+        else:
+            self.create_btn.setEnabled(False)
+            self.create_btn.setText("Create Links")
 
     def on_cell_clicked(self, row, column):
-        if column == 3:
+        if column == 0:  # Status column - toggle
+            item = self.table.item(row, column)
+            if item:
+                current_status = item.data(Qt.ItemDataRole.UserRole)
+                # Toggle between existing <-> to_update
+                if current_status == "existing":
+                    item.setText("To Update")
+                    item.setForeground(QColor("#2563eb"))
+                    item.setData(Qt.ItemDataRole.UserRole, "to_update")
+                    self._update_create_button()
+                elif current_status == "to_update":
+                    item.setText("Existing")
+                    item.setForeground(QColor("#71717a"))
+                    item.setData(Qt.ItemDataRole.UserRole, "existing")
+                    self._update_create_button()
+                    
+        elif column in [2, 3]:  # Meeting ID or Link column
             item = self.table.item(row, column)
             if item:
                 url = item.data(Qt.ItemDataRole.UserRole)

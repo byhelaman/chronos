@@ -199,7 +199,7 @@ class ZoomService:
                 "participant_video": False,
                 "join_before_host": True,
                 "mute_upon_entry": True,
-                "waiting_room": False
+                "waiting_room": True  # Enable waiting room
             }
         }
         
@@ -213,6 +213,63 @@ class ZoomService:
             raise Exception(f"Failed to create meeting: {response.text}")
             
         return response.json()
+
+    def update_meeting(
+        self,
+        access_token: str,
+        meeting_id: str,
+        topic: str,
+        start_time: str,
+        duration: int = 60,
+        recurrence: Optional[dict] = None
+    ) -> dict:
+        """
+        Actualiza una reunión existente de Zoom (topic y recurrence).
+        
+        Args:
+            access_token: Token de acceso
+            meeting_id: ID de la reunión a actualizar
+            topic: Nuevo tema de la reunión
+            start_time: Nueva hora de inicio (ISO 8601)
+            duration: Duración en minutos
+            recurrence: Configuración de recurrencia (opcional)
+            
+        Returns:
+            Éxito o error
+        """
+        url = f"https://api.zoom.us/v2/meetings/{meeting_id}"
+        
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+        
+        data = {
+            "topic": topic,
+            "type": 8 if recurrence else 2,
+            "start_time": start_time,
+            "duration": duration,
+            "timezone": "America/Lima",
+            "settings": {
+                "host_video": False,
+                "participant_video": False,
+                "join_before_host": True,
+                "mute_upon_entry": True,
+                "waiting_room": True
+            }
+        }
+        
+        if recurrence:
+            data["recurrence"] = recurrence
+            
+        response = httpx.patch(url, headers=headers, json=data, timeout=15.0)
+        
+        if response.status_code not in [200, 204]:
+            logger.error(f"Failed to update meeting {meeting_id}: {response.text}")
+            raise Exception(f"Failed to update meeting: {response.text}")
+        
+        logger.debug(f"Meeting {meeting_id} updated successfully")
+        return {"success": True, "meeting_id": meeting_id}
 
 
 # Instancia global del servicio

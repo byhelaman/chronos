@@ -661,14 +661,23 @@ class AutoAssignDialog(QDialog):
             if item and item.checkState() == Qt.CheckState.Checked:
                 found_instructor = item.data(Qt.ItemDataRole.UserRole)
                 meeting_id_item = self.table.item(i, 2)
+                time_item = self.table.item(i, 3)  # "HH:MM - HH:MM"
                 program_item = self.table.item(i, 5)
                 
                 if found_instructor and meeting_id_item:
+                    # Extract start_time from "HH:MM - HH:MM" format
+                    start_time = ""
+                    if time_item and time_item.text():
+                        time_parts = time_item.text().split(" - ")
+                        if time_parts:
+                            start_time = time_parts[0].strip()  # "HH:MM"
+                    
                     assignments.append({
                         "meeting_id": meeting_id_item.text(),
                         "new_host_email": found_instructor.get("email"),
                         "new_host_id": found_instructor.get("id"),
-                        "topic": program_item.text() if program_item else "Unknown Meeting"
+                        "topic": program_item.text() if program_item else "Unknown Meeting",
+                        "start_time": start_time  # Add start time
                     })
         
         if not assignments:
@@ -697,7 +706,8 @@ class AutoAssignDialog(QDialog):
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
         
-        self.update_worker = UpdateWorker(assignments)
+        # Always update recurrence with each assignment
+        self.update_worker = UpdateWorker(assignments, update_recurrence=True)
         self.update_worker.progress.connect(self.update_progress)
         self.update_worker.finished.connect(self.on_update_finished)
         self.update_worker.start()
@@ -714,7 +724,9 @@ class AutoAssignDialog(QDialog):
         msg = f"Process completed.\n\nSuccess: {len(successes)}\nErrors: {len(errors)}"
         
         if errors:
-            msg += "\n\nFirst few errors:\n" + "\n".join(errors[:3])
+            # Convert error dicts to strings if needed
+            error_strs = [str(e) if isinstance(e, dict) else e for e in errors[:3]]
+            msg += "\n\nFirst few errors:\n" + "\n".join(error_strs)
             custom_message_box(
                 self, "Completed with Errors", msg,
                 QMessageBox.Icon.Warning, QMessageBox.StandardButton.Ok

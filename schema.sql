@@ -236,6 +236,33 @@ CREATE POLICY "Authenticated read meetings"
   ON zoom_meetings FOR SELECT TO authenticated 
   USING (true);
 
+CREATE POLICY "Managers can insert meetings"
+  ON zoom_meetings FOR INSERT TO authenticated
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM user_profiles
+      WHERE user_profiles.user_id = auth.uid()
+      AND user_profiles.role IN ('admin', 'manager')
+    )
+  );
+
+CREATE POLICY "Managers can update meetings"
+  ON zoom_meetings FOR UPDATE TO authenticated
+  USING (
+    EXISTS (
+      SELECT 1 FROM user_profiles
+      WHERE user_profiles.user_id = auth.uid()
+      AND user_profiles.role IN ('admin', 'manager')
+    )
+  )
+  WITH CHECK (
+    EXISTS (
+      SELECT 1 FROM user_profiles
+      WHERE user_profiles.user_id = auth.uid()
+      AND user_profiles.role IN ('admin', 'manager')
+    )
+  );
+
 CREATE POLICY "Service role manages meetings" 
   ON zoom_meetings FOR ALL TO service_role 
   USING (true) WITH CHECK (true);
@@ -327,6 +354,22 @@ SELECT cron.schedule(
       'Authorization', 'Bearer ' || (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'cron_secret')
     ),
     body := jsonb_build_object('action', 'sync-meetings')
+  );
+  $$
+);
+
+-- Refresh Zoom token (every 45 minutes - token expires in 1 hour)
+SELECT cron.schedule(
+  'refresh-zoom-token', 
+  '*/45 * * * *',
+  $$
+  SELECT net.http_post(
+    url := (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'supabase_url') || '/functions/v1/cron-trigger',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'Authorization', 'Bearer ' || (SELECT decrypted_secret FROM vault.decrypted_secrets WHERE name = 'cron_secret')
+    ),
+    body := jsonb_build_object('action', 'refresh-token')
   );
   $$
 );

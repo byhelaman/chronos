@@ -253,12 +253,13 @@ class MeetingSearchDialog(QDialog):
             self.table.setItem(i, 2, host_item)
             
             # Created At
-            created_at = m.get("created_at", "")
-            try:
-                dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-                created_at = dt.strftime("%Y-%m-%d %H:%M")
-            except (ValueError, TypeError):
-                pass
+            created_at = m.get("created_at") or ""
+            if created_at:
+                try:
+                    dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    created_at = dt.strftime("%Y-%m-%d %H:%M")
+                except (ValueError, TypeError):
+                    pass
             created_at_item = QTableWidgetItem(created_at)
             created_at_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(i, 3, created_at_item)

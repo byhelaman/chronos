@@ -221,9 +221,14 @@ serve(async (req) => {
                 result = { action: 'sync-all', users, meetings }
                 break
 
+            case 'refresh-token':
+                // Token already refreshed above in refreshZoomToken()
+                result = { action: 'refresh-token', message: 'Token refreshed successfully' }
+                break
+
             default:
                 return new Response(
-                    JSON.stringify({ error: 'Unknown action', valid: ['sync-users', 'sync-meetings', 'sync-all'] }),
+                    JSON.stringify({ error: 'Unknown action', valid: ['sync-users', 'sync-meetings', 'sync-all', 'refresh-token'] }),
                     { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
                 )
         }
