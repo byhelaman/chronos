@@ -106,28 +106,66 @@ class VersionManager(QObject):
         try:
             exe_path = sys.executable
             exe_dir = os.path.dirname(exe_path)
+            exe_name = os.path.basename(exe_path)
             
             # Nombre del script de actualización
             updater_script = os.path.join(exe_dir, "updater.bat")
             
-            # Script batch para reemplazar el archivo
-            # Espera 2 segundos, intenta borrar el exe actual, renombra el nuevo, y reinicia
-            batch_content = f"""
-@echo off
-timeout /t 2 /nobreak > NUL
-:loop
-del "{exe_path}"
-if exist "{exe_path}" goto loop
+            # Script batch mejorado para evitar problemas de Python DLL
+            # - Espera más tiempo para que la app termine completamente
+            # - Limpia carpetas temporales de PyInstaller que pueden causar conflictos
+            # - Usa rutas absolutas
+            # - Verifica que el archivo existe antes de iniciar
+            batch_content = f'''@echo off
+setlocal enabledelayedexpansion
+
+echo [Chronos Updater] Starting update process...
+echo.
+
+REM Wait for the old process to fully exit
+echo [1/5] Waiting for current app to close...
+timeout /t 3 /nobreak > NUL
+
+REM Clean up PyInstaller temp folders that might have stale DLLs
+echo [2/5] Cleaning temporary files...
+for /d %%i in ("%TEMP%\\_MEI*") do (
+    rd /s /q "%%i" 2>NUL
+)
+
+REM Delete the old executable
+echo [3/5] Removing old version...
+:delete_loop
+del "{exe_path}" 2>NUL
+if exist "{exe_path}" (
+    timeout /t 1 /nobreak > NUL
+    goto delete_loop
+)
+
+REM Move new executable to replace old one
+echo [4/5] Installing new version...
 move "{new_file_path}" "{exe_path}"
-start "" "{exe_path}"
+
+REM Wait a moment before starting
+timeout /t 1 /nobreak > NUL
+
+REM Verify and start the new executable
+echo [5/5] Starting updated application...
+if exist "{exe_path}" (
+    start "" "{exe_path}"
+) else (
+    echo ERROR: Update file not found!
+    pause
+)
+
+REM Self-delete this script
 del "%~f0"
-            """
+'''
             
             with open(updater_script, "w") as f:
                 f.write(batch_content)
                 
             # Ejecutar script y salir
-            subprocess.Popen([updater_script], shell=True)
+            subprocess.Popen([updater_script], shell=True, creationflags=subprocess.CREATE_NEW_CONSOLE)
             sys.exit(0)
             
         except Exception as e:

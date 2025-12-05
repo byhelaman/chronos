@@ -130,18 +130,35 @@ class SessionService:
                     self.clear_session()
                     return None
             
-            # Refresh user info from database to ensure permissions are up to date
+            # ALWAYS refresh user info from database to ensure permissions are up to date
+            # This is critical after app updates where session format might have changed
             try:
                 from app.services.auth_service import auth_service
-                user_info = auth_service.get_user_info(supabase, session_data["user_info"]["id"])
                 
-                # Update session data with fresh user info
-                if user_info != session_data["user_info"]:
-                    print("User info updated, saving session...")
-                    self.save_session(supabase, user_info)
+                # Get fresh user_id - might be stored differently in old sessions
+                old_user_info = session_data.get("user_info", {})
+                user_id = old_user_info.get("id")
+                
+                if not user_id:
+                    print("Session invalid (no user_id), clearing...")
+                    self.clear_session()
+                    return None
+                
+                # Always fetch fresh permissions from database
+                user_info = auth_service.get_user_info(supabase, user_id)
+                
+                # Verify we got valid permissions
+                if not user_info.get("permissions"):
+                    print("Warning: No permissions found for user")
+                
+                # Update session data with fresh user info (including fresh permissions)
+                self.save_session(supabase, user_info)
+                
             except Exception as e:
-                print(f"Warning: Could not refresh user info: {e}")
-                user_info = session_data["user_info"]
+                print(f"Could not refresh user info: {e}")
+                print("Session may be stale, forcing re-login...")
+                self.clear_session()
+                return None
             
             print(f"✓ Session restored for {user_info.get('email', 'user')}")
             
