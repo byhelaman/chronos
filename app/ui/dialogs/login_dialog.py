@@ -16,6 +16,7 @@ from typing import Optional, Dict
 
 from app.services.auth_service import auth_service
 from app.services.session_service import session_service
+from app.config import config
 
 
 class LoginWorker(QThread):
@@ -96,7 +97,6 @@ class LoginDialog(QDialog):
         self.email_input = QLineEdit()
         self.email_input.setPlaceholderText("name@example.com")
         self.email_input.setFixedHeight(40)
-        self.email_input.textChanged.connect(self._validate_email)
         self.email_input.returnPressed.connect(self._focus_password)
         email_layout.addWidget(self.email_input)
         
@@ -123,7 +123,6 @@ class LoginDialog(QDialog):
         self.password_input = QLineEdit()
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.password_input.setFixedHeight(40)
-        self.password_input.textChanged.connect(self._validate_password)
         self.password_input.returnPressed.connect(self._on_login)
         pass_layout.addWidget(self.password_input)
         
@@ -161,6 +160,14 @@ class LoginDialog(QDialog):
         layout.addWidget(self.login_button)
         
         layout.addStretch()
+        
+        # Connect validation signals after all widgets are created
+        self.email_input.textChanged.connect(self._validate_email)
+        self.password_input.textChanged.connect(self._validate_password)
+        
+        # Pre-fill with last used email
+        if config.last_email:
+            self.email_input.setText(config.last_email)
     
     def _apply_styles(self):
         self.setStyleSheet("""
@@ -249,6 +256,10 @@ class LoginDialog(QDialog):
     def _on_login_success(self, supabase: Client, user_info: Dict):
         self.supabase_client = supabase
         self.user_info = user_info
+        
+        # Save email for next login
+        email = self.email_input.text().strip()
+        config.save_email(email)
         
         if self.remember_checkbox.isChecked():
             session_service.save_session(supabase, user_info)
