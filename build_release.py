@@ -91,8 +91,6 @@ def main():
         "--exclude-module", "ipython",
         "--exclude-module", "jedi",
         "--exclude-module", "PIL",
-        "--exclude-module", "setuptools",
-        "--exclude-module", "distutils",
         "--exclude-module", "test",
         "--exclude-module", "unittest",
         MAIN_SCRIPT
